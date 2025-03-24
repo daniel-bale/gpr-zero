@@ -1,0 +1,27 @@
+[project]
+name = "gpr-zero"
+version = "0.1.0"
+description = "Improving Geopolitical Risk Assessment with LLM-based approaches"
+readme = "README.md"
+requires-python = ">=3.12"
+# The dependencies list will be managed by uv add/remove commands
+dependencies = [
+    "duckdb>=1.2.1",
+    "ibis-framework[duckdb,polars]>=10.3.1",
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.1",
+    "numpy>=2.2.3",
+    "openai>=1.66.3",
+    "polars>=1.25.0",
+    "python-dotenv>=1.0.1",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Dev dependencies will be managed by uv add/remove --dev commands
+[project.optional-dependencies]
+dev = []
