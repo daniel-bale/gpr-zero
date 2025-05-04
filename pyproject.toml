@@ -6,16 +6,25 @@ readme = "README.md"
 requires-python = ">=3.12"
 # The dependencies list will be managed by uv add/remove commands
 dependencies = [
+    "beautifulsoup4>=4.13.4",
     "duckdb>=1.2.1",
+    "fastwarc>=0.15.2",
     "ibis-framework[duckdb,polars]>=10.3.1",
     "ipykernel>=6.29.5",
+    "lxml>=5.4.0",
     "matplotlib>=3.10.1",
     "numpy>=2.2.3",
     "openai>=1.66.3",
+    "pandas>=2.2.3",
     "polars>=1.25.0",
+    "pytest>=8.3.5",
     "python-dotenv>=1.0.1",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.3",
     "seaborn>=0.13.2",
+    "tabulate>=0.9.0",
     "tqdm>=4.67.1",
+    "warcio>=1.7.5",
 ]
 
 [build-system]
@@ -25,3 +34,27 @@ build-backend = "setuptools.build_meta"
 # Dev dependencies will be managed by uv add/remove --dev commands
 [project.optional-dependencies]
 dev = []
+
+[tool.pyright]
+exclude = [
+    "**/__pycache__",
+    "**/.venv", # Or your specific virtual environment directory name
+    "**/.git",
+    "**/node_modules", # If you have any node projects
+    "fastwarc-deps",
+    "data",
+    "logs",
+    "prompts",
+    "docs",
+    "**/*.md",
+    "**/*.log",
+    "**/*.png",
+    "**/*.sh"
+    # Add any other directories or file patterns you want to exclude
+]
+include = [
+    "src" # Or wherever your primary source code resides
+    # You might want to explicitly include only the necessary source directories
+]
+# pythonVersion = "3.12" # Specify your Python version (matches requires-python)
+# pythonPlatform = "Linux" # Specify your platform if needed

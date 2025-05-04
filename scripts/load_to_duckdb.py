@@ -116,7 +116,7 @@ def create_duckdb(truncate=False):
     logger.info("Creating articles table if it doesn't exist")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS articles (
-            id VARCHAR PRIMARY KEY,
+            article_hash VARCHAR PRIMARY KEY,
             newspaper VARCHAR,
             date DATE,
             headline VARCHAR,
@@ -148,41 +148,61 @@ def create_duckdb(truncate=False):
         logger.info(f"Loading {ndjson_file}")
 
         # Create a temporary table for this file
-        temp_table = f"temp_{os.path.basename(ndjson_file).replace('.', '_')}"
+        # Replace dots and hyphens in filename for valid SQL table name
+        temp_table_base = os.path.basename(ndjson_file).replace('.', '_').replace('-', '_')
+        temp_table = f"temp_{temp_table_base}"
         logger.info(f"Creating temporary table: {temp_table}")
 
         try:
             # Clean any existing temp table
             conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
-            # Create the temp table from the NDJSON file
+            # Create the temp table from the NDJSON file, inferring schema
             conn.execute(f"""
-                CREATE TABLE {temp_table} AS
+                CREATE TEMP TABLE {temp_table} AS
                 SELECT * FROM read_ndjson_auto('{ndjson_file}');
             """)
 
             # Get count of records in the temp table
             result = conn.execute(f"SELECT COUNT(*) FROM {temp_table}")
             temp_count = result.fetchone()[0]
-            logger.info(f"Loaded {temp_count} articles from {ndjson_file}")
+            logger.info(f"Loaded {temp_count} articles into {temp_table} from {ndjson_file}")
 
-            # Check for duplicates
+            # Define target columns for the final table (excluding original 'id')
+            target_columns = "article_hash, newspaper, date, headline, content, category, page, author, source_file"
+            
+            # Columns to select from temp table (all needed for the hash or final table)
+            # Original 'id' IS needed now for the hash key
+            select_columns_from_temp = "t.newspaper, t.date, t.headline, t.content, t.category, t.page, t.author, t.source_file"
+            
+            # Generate hash key using id, date, headline, category
+            # Ensure date is cast to VARCHAR for concatenation
+            hash_expression = "md5(t.id || t.date::VARCHAR || t.headline || t.category)"
+
+            # Check for duplicates using the new 4-part hash key
             result = conn.execute(f"""
                 SELECT COUNT(*) FROM {temp_table} t 
-                WHERE EXISTS (SELECT 1 FROM articles a WHERE a.id = t.id)
+                WHERE EXISTS (SELECT 1 FROM articles a WHERE a.article_hash = {hash_expression})
             """)
             dup_count = result.fetchone()[0]
             duplicates += dup_count
 
             if dup_count > 0:
-                logger.warning(f"Found {dup_count} duplicate articles in {ndjson_file}")
-
-            # Insert non-duplicate records
+                logger.warning(f"Found {dup_count} duplicate articles (based on id+date+headline+category hash) already in 'articles' table from {ndjson_file}")
+            
+            # Insert non-duplicate records, generating the hash key
+            # Note: We select columns explicitly from temp table 't'
             conn.execute(f"""
-                INSERT INTO articles 
-                SELECT * FROM {temp_table} t 
-                WHERE NOT EXISTS (SELECT 1 FROM articles a WHERE a.id = t.id)
+                INSERT INTO articles ({target_columns})
+                SELECT 
+                    {hash_expression} as article_hash,
+                    {select_columns_from_temp} 
+                FROM {temp_table} t 
+                WHERE NOT EXISTS (SELECT 1 FROM articles a WHERE a.article_hash = {hash_expression})
             """)
+
+            inserted_count = temp_count - dup_count
+            logger.info(f"Inserted {inserted_count} new articles into 'articles' table from {temp_table}")
 
             # Drop the temporary table
             conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
@@ -281,7 +301,7 @@ def main():
     else:
         logger.info("Skipping RTF parsing as requested")
 
-    # Count processed files
+    # Count processed files (will now count both TXT and RTF derived files)
     processed_count = count_processed_files()
     logger.info(f"Total processed NDJSON files: {processed_count}")
 

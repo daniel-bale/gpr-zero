@@ -1,0 +1,120 @@
+{
+  "metadata": {
+    "name": "caldara_translation_combined",
+    "description": "Translate Caldara & Iacoviello (2022)'s GPR dictionary terms to Chinese",
+    "version": "1.0",
+    "type": "translation",
+    "source": "Caldara & Iacoviello (2022)",
+    "target_language": "Chinese (Traditional)"
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are an expert in geopolitical risk assessment, linguistic translation, and Chinese language. Your task is to accurately translate geopolitical risk terminology from English to Chinese (Traditional), ensuring that the translations maintain the same professional tone and meaning of the original terms."
+      },
+      {
+        "role": "user",
+        "content": "I need you to translate the following geopolitical risk terms from Caldara & Iacoviello (2022)'s GPR dictionary from English to Chinese (Traditional). Please maintain the categorical structure and ensure the translations effectively capture the same risk signals.\n\nNote that in the original research, categories are constructed using ProQuest operators like 'N/#' which allows up to the specified number of words to appear between the search terms in any order. When translating terms with asterisks (*), please consider all possible word endings and variations in your translation, but do not include the asterisk symbol in the Chinese translation. For example, when translating \"threat*\", consider translating it to cover all forms like \"threat\", \"threats\", and \"threatening\" in Chinese.\n\nIMPORTANT: Metadata is not part of what needs to be translated - it's just to help you understand the context. The output should contain only Chinese translations for the terms, but metadata fields can be in any language.\n\nHere is the dictionary to translate:\n\n{\n    \"metadata\": {\n        \"source\": \"Caldara & Iacoviello (2022)\",\n        \"description\": \"Original GPR index dictionary with category construction rules\",\n        \"note\": \"N/# is a Proquest operator that allows up to the specified number of words to appear between the search terms in any order. The truncation character (*) denotes a search including all possible endings of a word, e.g. \\\"threat*\\\" includes \\\"threat\\\" or \\\"threats\\\" or \\\"threatening.\\\"\"\n    },\n    \"categories\": {\n        \"war_threats\": \"War_words N/2 Threat_words\",\n        \"peace_threats\": \"Peace_words N/2 Threat_words AND Peace_disruption_words\",\n        \"military_buildup\": \"Military_words AND buildup_words\",\n        \"nuclear_threats\": \"Nuclear_bigrams AND Threat_words\",\n        \"terrorist_threats\": \"Terrorism_words N/2 Threat_words\",\n        \"beginning_of_war\": \"War_words N/2 War_begin_words\",\n        \"escalation_of_war\": \"War_words N/2 Actors_words N/2 Actors_fight_words\",\n        \"terrorist_acts\": \"Terrorism_words N/2 Terrorism_act_words\"\n    },\n    \"word_sets\": {\n        \"war_words\": [\n            \"war\",\n            \"conflict\",\n            \"hostilities\",\n            \"revolution\",\n            \"insurrection\",\n            \"uprising\",\n            \"revolt\",\n            \"coup\",\n            \"geopolitical\"\n        ],\n        \"peace_words\": [\n            \"peace\",\n            \"truce\",\n            \"armistice\",\n            \"treaty\",\n            \"parley\"\n        ],\n        \"military_words\": [\n            \"military\",\n            \"troops\",\n            \"soldiers\",\n            \"missiles\",\n            \"armies\",\n            \"weapons\",\n            \"bombs\",\n            \"warheads\"\n        ],\n        \"nuclear_bigrams\": [\n            \"nuclear war*\",\n            \"atomic war*\",\n            \"nuclear missile*\",\n            \"nuclear bomb*\",\n            \"atomic bomb*\",\n            \"h-bomb*\",\n            \"hydrogen bomb*\",\n            \"nuclear test*\",\n            \"nuclear weapon*\"\n        ],\n        \"terrorism_words\": [\n            \"terror*\",\n            \"guerrilla*\",\n            \"hostage*\"\n        ],\n        \"actor_words\": [\n            \"allie*\",\n            \"enem*\",\n            \"insurgen*\",\n            \"foe*\",\n            \"army\",\n            \"navy\",\n            \"aerial\",\n            \"troops\",\n            \"rebels\"\n        ],\n        \"threat_words\": [\n            \"threat*\",\n            \"warn*\",\n            \"fear*\",\n            \"risk*\",\n            \"concern*\",\n            \"danger*\",\n            \"doubt*\",\n            \"crisis\",\n            \"troubl*\",\n            \"disput*\",\n            \"tension*\",\n            \"imminen*\",\n            \"inevitable\",\n            \"looting\",\n            \"menace*\",\n            \"brink\",\n            \"scare\",\n            \"peril*\"\n        ],\n        \"peace_disruption_words\": [\n            \"threat*\",\n            \"menace*\",\n            \"reject*\",\n            \"peril*\",\n            \"boycott*\",\n            \"disrupt*\"\n        ],\n        \"buildup_words\": [\n            \"buildup*\",\n            \"build-up*\",\n            \"sanction*\",\n            \"blockad*\",\n            \"embargo\",\n            \"quarantine\",\n            \"ultimatum\",\n            \"mobiliz*\"\n        ],\n        \"war_begin_words\": [\n            \"begin*\",\n            \"start*\",\n            \"declar*\",\n            \"begun\",\n            \"began\",\n            \"outbreak\",\n            \"broke out\",\n            \"breakout\",\n            \"proclamation\",\n            \"launch*\"\n        ],\n        \"actor_fight_words\": [\n            \"advance*\",\n            \"attack*\",\n            \"strike*\",\n            \"drive*\",\n            \"shell*\",\n            \"offensive\",\n            \"invasion\",\n            \"invad*\",\n            \"clash*\",\n            \"raid*\",\n            \"launch*\"\n        ],\n        \"terrorism_act_words\": [\n            \"attack\",\n            \"act\",\n            \"bomb*\",\n            \"kill*\",\n            \"strike*\",\n            \"hijack*\"\n        ]\n    }\n}"
+      }
+    ],
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "gpr_dictionary_translation",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "source": { "type": "string" },
+                "date": { "type": "string" },
+                "description": { "type": "string" },
+                "note": { "type": "string" }
+              },
+              "required": ["source", "date", "description", "note"],
+              "additionalProperties": false
+            },
+            "categories": {
+              "type": "object",
+              "properties": {
+                "war_threats": { "type": "string" },
+                "peace_threats": { "type": "string" },
+                "military_buildup": { "type": "string" },
+                "nuclear_threats": { "type": "string" },
+                "terrorist_threats": { "type": "string" },
+                "beginning_of_war": { "type": "string" },
+                "escalation_of_war": { "type": "string" },
+                "terrorist_acts": { "type": "string" }
+              },
+              "required": ["war_threats", "peace_threats", "military_buildup", "nuclear_threats", 
+                          "terrorist_threats", "beginning_of_war", "escalation_of_war", "terrorist_acts"],
+              "additionalProperties": false
+            },
+            "word_sets": {
+              "type": "object",
+              "properties": {
+                "war_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "peace_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "military_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "nuclear_bigrams": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "terrorism_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "actor_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "threat_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "peace_disruption_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "buildup_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "war_begin_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "actor_fight_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                },
+                "terrorism_act_words": {
+                  "type": "array", 
+                  "items": { "type": "string" }
+                }
+              },
+              "required": ["war_words", "peace_words", "military_words", "nuclear_bigrams", 
+                          "terrorism_words", "actor_words", "threat_words", "peace_disruption_words",
+                          "buildup_words", "war_begin_words", "actor_fight_words", "terrorism_act_words"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["metadata", "categories", "word_sets"],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    }
+  }
+} 

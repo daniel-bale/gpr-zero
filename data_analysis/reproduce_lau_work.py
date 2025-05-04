@@ -11,10 +11,35 @@ import matplotlib
 
 matplotlib.use("Agg")  # Use the Agg backend for non-interactive plotting
 
+# --- Font Setup for CJK ---
+import matplotlib.pyplot as plt # Need plt for rcParams
+import matplotlib.font_manager as fm
+
+font_path = Path("data/fonts/NotoSansCJKtc-Regular.otf")
+if font_path.is_file():
+    fm.fontManager.addfont(str(font_path))
+    # Specify the font family name matplotlib should recognize
+    # This might require slight adjustment depending on the font's internal name
+    font_name = "Noto Sans CJK TC Regular" 
+    plt.rcParams['font.family'] = 'sans-serif' # Use sans-serif stack
+    # Prepend the CJK font to the sans-serif list
+    plt.rcParams['font.sans-serif'] = [font_name] + plt.rcParams['font.sans-serif']
+    # Ensure minus signs are handled correctly
+    plt.rcParams['axes.unicode_minus'] = False 
+    print(f"Registered and set font: {font_name} from {font_path}")
+else:
+    print(f"Font file not found at {font_path}. CJK characters may not display correctly.")
+# --- End Font Setup ---
+
 # Import gpr_zero modules directly (they are auto-installed by uv)
 from gpr_zero.gpr_index.calculator import GPRCalculator
 from gpr_zero.gpr_index.analyzer import GPRAnalyzer
-
+# %%
+import polars as pl
+df = pl.read_ndjson("/home5/chuenho/gpr-zero/data/news/processed/LT-military_buildup_02.ndjson")
+df.with_columns(
+    pl.col("date").str.strptime(pl.Datetime, "%Y-%m-%d")
+).sort("date").group_by_dynamic("date", every="1w").agg(pl.len()).head(20)
 # %% [markdown]
 # # Reproducing Yeu-Tong Lau's Work on GPR Index
 #
@@ -29,6 +54,7 @@ import seaborn as sns
 from datetime import datetime
 import re
 import argparse
+import ibis.expr.datatypes as dt # Import datatypes module
 
 # Set visualization style
 sns.set_style("whitegrid")
@@ -52,34 +78,31 @@ CORRECT_CATEGORIES = ["war_threat", "peace_threat", "military_buildup", "war_beg
 # %%
 # Parse command line arguments
 parser = argparse.ArgumentParser(description="Reproduce GPR analysis from Lau (2024)")
-parser.add_argument(
-    "--divide_by_total",
-    action="store_true",
-    help="Divide GPR by total article count (default: False)",
-)
-parser.add_argument(
-    "--total_count",
-    type=int,
-    default=None,
-    help="Override total article count for GPR calculation",
-)
+# parser.add_argument(
+#     "--divide_by_total",
+#     action="store_true",
+#     help="Divide GPR by total article count (default: False)",
+# )
+# parser.add_argument(
+#     "--total_count",
+#     type=int,
+#     default=None,
+#     help="Override total article count for GPR calculation",
+# )
 
 # Handle both script and notebook contexts
-if "ipykernel" in sys.modules:  # Running in a notebook
-    DIVIDE_BY_TOTAL = False
-    TOTAL_COUNT_OVERRIDE = None
-else:  # Running as a script
-    try:
-        args, _ = parser.parse_known_args()
-        DIVIDE_BY_TOTAL = args.divide_by_total
-        TOTAL_COUNT_OVERRIDE = args.total_count
-    except:
-        # Fallback to defaults if argument parsing fails
-        DIVIDE_BY_TOTAL = False
-        TOTAL_COUNT_OVERRIDE = None
-        print(
-            "Argument parsing failed, using defaults: divide_by_total=False, total_count_override=None"
-        )
+# For this script, we always use the Lau normalization method
+# if "ipykernel" in sys.modules:  # Running in a notebook
+#     pass # No arguments needed in notebook context for this version
+# else:  # Running as a script
+#     try:
+#         args, unknown_args = parser.parse_known_args()
+#         # We are not using command-line flags for calculation type anymore
+#     except:
+#         # Fallback if argument parsing fails (though not expected now)
+#         print(
+#             "Argument parsing failed, proceeding with default Lau normalization"
+#         )
 
 # Set up logging
 LOG_FILE = os.path.join(OUTPUT_DIR, "gpr_analysis.log")
@@ -94,24 +117,25 @@ logger = logging.getLogger(__name__)
 
 # %%
 # Connect to the DuckDB database
-conn = ibis.connect("duckdb://data/news/news.duckdb")
+conn = ibis.connect("duckdb:///home5/chuenho/gpr-zero/data/news/news.duckdb")
 
 # %%
 # List tables in the database
 logger.info("Tables in the database:")
 logger.info(conn.list_tables())
 
-# Check if the news_articles table exists
-if "news_articles" in conn.list_tables():
-    # Get the news_articles table
-    articles = conn.table("news_articles")
+# Check if the articles table exists
+if "articles" in conn.list_tables():
+    # Get the articles table
+    articles = conn.table("articles")
 else:
-    raise ValueError("news_articles table not found in database")
+    raise ValueError("articles table not found in database")
 
 # %%
 # Display the schema
 logger.info("Articles table schema:")
 logger.info(articles.schema())
+articles.limit(5).to_polars()
 
 # %%
 # Get the first 5 rows of the articles table using to_polars instead of execute
@@ -132,7 +156,7 @@ logger.info(f"Total number of articles: {total_articles}")
 logger.info("\nArticles by newspaper:")
 news_counts = (
     articles.group_by("newspaper")
-    .aggregate(count=_.id.count())
+    .aggregate(count=_.article_hash.count())
     .order_by(ibis.desc("count"))
     .to_polars()
 )
@@ -142,7 +166,7 @@ logger.info(news_counts)
 logger.info("\nArticles by date (last 10 days):")
 date_counts = (
     articles.group_by("date")
-    .aggregate(count=_.id.count())
+    .aggregate(count=_.article_hash.count())
     .order_by(ibis.desc("date"))
     .limit(10)
     .to_polars()
@@ -153,7 +177,7 @@ logger.info(date_counts)
 logger.info("\nTop 10 article categories:")
 category_counts = (
     articles.group_by("category")
-    .aggregate(count=_.id.count())
+    .aggregate(count=_.article_hash.count())
     .order_by(ibis.desc("count"))
     .limit(10)
     .to_polars()
@@ -210,419 +234,547 @@ except FileNotFoundError:
 except json.JSONDecodeError:
     raise ValueError("Error parsing the GPR dictionary JSON file.")
 
-# %%
-# Create a temporary dictionary file for the GPRCalculator
-temp_dict_path = os.path.join(OUTPUT_DIR, "temp_dictionary.json")
-with open(temp_dict_path, "w", encoding="utf-8") as f:
-    json.dump(gpr_dict, f)
-
-
-# Create the GPR calculator with option to disable division by total
-class CustomGPRCalculator(GPRCalculator):
-    def __init__(
-        self,
-        dictionary_path: str = None,
-        divide_by_total: bool = True,
-        total_count_override: int = None,
-    ):
-        super().__init__(dictionary_path=dictionary_path)
-        self.divide_by_total = divide_by_total
-        self.total_count_override = total_count_override
-
-    def calculate_index_for_date(self, date: str, articles: dict) -> dict:
-        """Override to optionally skip division by total article count"""
-        # First calculate using the standard method
-        result = super().calculate_index_for_date(date, articles)
-
-        # If we don't want to divide by total, multiply back by the total count that was used
-        if not self.divide_by_total:
-            # If total_count_override is provided, use that instead
-            total_count = (
-                self.total_count_override
-                if self.total_count_override
-                else len(articles)
-            )
-
-            # Adjust the overall index
-            if "overall_index" in result:
-                result["overall_index"] *= total_count
-
-            # Adjust category indices
-            if "category_indices" in result and isinstance(
-                result["category_indices"], dict
-            ):
-                for category in result["category_indices"]:
-                    result["category_indices"][category] *= total_count
-
-        return result
-
-
-# Initialize the calculator with the division option
-gpr_calculator = CustomGPRCalculator(
-    dictionary_path=temp_dict_path,
-    divide_by_total=DIVIDE_BY_TOTAL,
-    total_count_override=TOTAL_COUNT_OVERRIDE,
-)
-logger.info(
-    f"Using CustomGPRCalculator with divide_by_total={DIVIDE_BY_TOTAL}, total_count_override={TOTAL_COUNT_OVERRIDE}"
+# %%        
+# Initialize the calculator (Now using the imported GPRCalculator)
+gpr_calculator = GPRCalculator(
+    dictionary_path="data/dictionaries/yeu_tong_lau_2024.json",
 )
 
-# %%
-# Get all articles as a Polars DataFrame for processing
-articles_df = articles.to_polars()
+# %% [markdown]
+# ## Prepare Data and Calculate Daily GPR Index
+# The `prepare` method labels the articles table in the database using ibis expressions.
+# The `query` method then aggregates these labels to calculate daily GPR counts.
 
-# Map newspaper names to English
-articles_df = articles_df.with_columns(
-    pl.col("newspaper")
-    .map_dict(NEWSPAPER_MAP, default=pl.col("newspaper"))
-    .alias("newspaper_en")
+# %%
+# Get the base articles table from ibis connection
+logger.info("Getting articles table from database...")
+articles_table = conn.table("articles") # Assuming 'conn' is the active ibis connection
+logger.info(f"Articles table schema: {articles_table.schema()}")
+
+# Add newspaper_en column using ibis for consistent mapping
+logger.info("Adding 'newspaper_en' column...")
+articles_with_en = articles_table.mutate(
+    newspaper_en=ibis.cases(
+        (articles_table.newspaper == "中國時報", "China Times"),
+        (articles_table.newspaper == "聯合報", "UDN"),
+        (articles_table.newspaper == "自由時報", "Liberty Times"),
+        (articles_table.newspaper == "工商時報", "Commercial Times"),
+        else_=articles_table.newspaper # Keep original if no match
+    )
 )
+logger.info("Added 'newspaper_en'.")
 
-# Convert to dictionary format expected by GPRCalculator
-articles_by_date = {}
-for date in articles_df["date"].unique():
-    date_str = date.strftime("%Y-%m-%d")
-    articles_by_date[date_str] = {}
 
-    date_articles = articles_df.filter(pl.col("date") == date)
-    for row in date_articles.iter_rows(named=True):
-        articles_by_date[date_str][row["id"]] = row["content"]
+# Prepare the data (label articles) using the calculator
+logger.info("Preparing data using GPR calculator...")
+gpr_calculator.prepare(articles_with_en) # Pass the ibis table with newspaper_en
+logger.info("Data preparation complete.")
+
+
+# Calculate daily GPR counts using the query method
+logger.info("Calculating daily GPR index counts...")
+daily_gpr_pl = gpr_calculator.query(group_by_cols=['date'])
+logger.info(f"Calculated daily GPR counts. Shape: {daily_gpr_pl.shape}")
+
+# Convert to pandas DataFrame and set index for downstream compatibility
+logger.info("Converting results to pandas DataFrame and setting index...")
+if not daily_gpr_pl.is_empty():
+    # Rename columns to match downstream expectations (e.g., category counts)
+    rename_mapping = {f"{cat}_count": cat for cat in gpr_calculator.category_definitions.keys()}
+    daily_gpr_pl = daily_gpr_pl.rename(rename_mapping)
+
+    # Convert to pandas, assuming 'date_bucketed' or 'date' is the time column name
+    time_col_name = 'date' # Adjust if bucketing was used and renamed the column
+    if time_col_name not in daily_gpr_pl.columns:
+         # Handle potential renaming from bucketing if default 'date' isn't present
+         potential_time_cols = [c for c in daily_gpr_pl.columns if c.startswith('date')]
+         if potential_time_cols:
+              time_col_name = potential_time_cols[0] # Use the first match
+              logger.warning(f"Using inferred time column: {time_col_name}")
+         else:
+              raise KeyError("Could not find suitable date/time column in the results.")
+
+    # Set index and sort (Polars sorts by default on query, but good practice)
+    gpr_indices_df = daily_gpr_pl.to_pandas().set_index(time_col_name).sort_index()
+    logger.info(f"Pandas DataFrame ready. Shape: {gpr_indices_df.shape}, Columns: {gpr_indices_df.columns}")
+    logger.debug(f"GPR Indices DataFrame head:\n{gpr_indices_df.head()}")
+else:
+    logger.warning("GPR calculation resulted in an empty DataFrame.")
+    # Create an empty DataFrame with expected columns if needed downstream
+    expected_cols = ['overall_index'] + list(gpr_calculator.category_definitions.keys())
+    gpr_indices_df = pd.DataFrame(columns=expected_cols)
+    gpr_indices_df.index.name = 'date'
+
 
 # %%
-# Calculate GPR indices using the existing calculator
-logger.info("Calculating GPR indices...")
-# Add progress logging
-total_dates = len(articles_by_date)
-logger.info(f"Processing {total_dates} dates")
-progress_step = max(1, total_dates // 10)  # Log progress every 10%
-
-gpr_indices = {}
-for i, (date, articles) in enumerate(articles_by_date.items()):
-    result = gpr_calculator.calculate_index_for_date(date, articles)
-    gpr_indices[date] = result
-
-    # Log progress
-    if (i + 1) % progress_step == 0 or i + 1 == total_dates:
-        logger.info(
-            f"Progress: {i + 1}/{total_dates} dates processed ({(i + 1) / total_dates * 100:.1f}%)"
-        )
-
-# Convert to pandas DataFrame
-gpr_indices_df = pd.DataFrame.from_dict(gpr_indices, orient="index")
-logger.info(f"Calculated indices for {len(gpr_indices_df)} dates")
-
-# Ensure the index is a datetime type for proper plotting
-gpr_indices_df.index = pd.to_datetime(gpr_indices_df.index)
-gpr_indices_df = gpr_indices_df.sort_index()
-
-# Replace the original gpr_indices with the dataframe
-gpr_indices = gpr_indices_df
+# --- No daily normalization needed for plots 1-4 ---
 
 # %%
-# Plot overall GPR trend over time
+# --- No immediate weekly resampling here; done later for specific plots ---
+
+# %%
+# Plot overall GPR trend over time (Daily Counts - Plot 1)
+# This section should now work correctly if gpr_indices_df was created successfully
+logger.info("Plotting Daily GPR Counts (Plot 1)...")
 plt.figure(figsize=(14, 7))
-gpr_indices["overall_index"].plot(label="Overall GPR")
-plt.title("Geopolitical Risk Index Over Time")
-plt.xlabel("Date")
-plt.ylabel("Index Value")
-plt.legend()
-plt.tight_layout()
-plt.savefig(
-    os.path.join(OUTPUT_DIR, "gpr_overall_trend.png")
-)  # Save to output directory
-plt.close()  # Close the figure to free memory
+if "overall_index" in gpr_indices_df.columns:
+    gpr_indices_df["overall_index"].plot(label="Overall GPR (Daily Count)")
+    plt.title("Geopolitical Risk Index Over Time (Daily Article Counts)")
+    plt.xlabel("Date")
+    plt.ylabel("Number of Articles")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "gpr_overall_trend_daily_counts.png"))
+    plt.close()
+else:
+    logger.warning("Column 'overall_index' not found in gpr_indices_df. Skipping Plot 1.")
 
 # %%
-# ANALYSIS 1: Check for peak during Nancy Pelosi's visit (around 2022/8/5)
-pelosi_visit = pd.Timestamp(
-    "2022-08-05"
-)  # Use pandas Timestamp instead of datetime.date
+# Plot Weekly GPR (Counts - Plot 2)
+# This section uses pandas resampling on gpr_indices_df, should work
+logger.info("Calculating and Plotting Weekly GPR Counts (Plot 2)...")
+if not gpr_indices_df.empty:
+    gpr_indices_weekly_sum = gpr_indices_df.resample('W').sum()
+    plt.figure(figsize=(14, 7))
+    if "overall_index" in gpr_indices_weekly_sum.columns:
+        gpr_indices_weekly_sum["overall_index"].plot(label="Overall GPR (Weekly Count)")
+        plt.title("Geopolitical Risk Index Over Time (Weekly Article Counts)")
+        plt.xlabel("Date (Week Ending)")
+        plt.ylabel("Number of Articles")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, "gpr_overall_trend_weekly_counts.png"))
+        plt.close()
+    else:
+         logger.warning("Column 'overall_index' not found after weekly resampling. Skipping Plot 2.")
+else:
+    logger.warning("gpr_indices_df is empty. Skipping Plot 2.")
+
+
+# %%
+# ANALYSIS 1: Check for peak during Nancy Pelosi's visit (around 2022/8/5) - Daily Counts
+# This uses the pandas gpr_indices_df, should work
+logger.info("Analyzing Pelosi Visit peak using Daily Counts...")
+pelosi_visit_date = pd.Timestamp("2022-08-05")
+# Define window around the visit for daily data
 window_start = pd.Timestamp("2022-07-25")
 window_end = pd.Timestamp("2022-08-15")
 
-# Filter the data for the Pelosi period
-pelosi_period = gpr_indices[
-    (gpr_indices.index >= window_start) & (gpr_indices.index <= window_end)
+# Filter the DAILY data for the Pelosi period
+pelosi_period_daily = gpr_indices_df[
+    (gpr_indices_df.index >= window_start) & (gpr_indices_df.index <= window_end)
 ]
 
-if not pelosi_period.empty:
+if not pelosi_period_daily.empty:
     plt.figure(figsize=(10, 6))
-    pelosi_period["overall_index"].plot()
-    plt.axvline(x=pelosi_visit, color="r", linestyle="--", label="Pelosi's Visit")
-    plt.title("GPR Index Around Nancy Pelosi's Visit to Taiwan")
+    pelosi_period_daily["overall_index"].plot()
+    plt.axvline(x=pelosi_visit_date, color="r", linestyle="--", label="Pelosi's Visit Date")
+    plt.title("Daily GPR Counts Around Nancy Pelosi's Visit to Taiwan")
     plt.xlabel("Date")
-    plt.ylabel("Index Value")
+    plt.ylabel("Number of Articles")
     plt.legend()
     plt.tight_layout()
     plt.savefig(
-        os.path.join(OUTPUT_DIR, "pelosi_visit_gpr.png")
-    )  # Save to output directory
-    plt.close()  # Close the figure
+        os.path.join(OUTPUT_DIR, "pelosi_visit_gpr_daily_counts.png")
+    )  
+    plt.close()  
 
-    # Find peak around the visit
-    peak_date = pelosi_period["overall_index"].idxmax()
-    peak_value = pelosi_period["overall_index"].max()
+    # Find peak day around the visit
+    peak_date = pelosi_period_daily["overall_index"].idxmax()
+    peak_value = pelosi_period_daily["overall_index"].max()
 
     logger.info(
-        f"Peak GPR around Pelosi's visit: {peak_date} with value {peak_value:.4f}"
+        f"Peak Daily GPR count around Pelosi's visit: {peak_date.date()} with value {peak_value}"
     )
 
-    # Check if peak is close to Pelosi's visit
-    days_difference = abs((peak_date - pelosi_visit).days)
+    # Check if peak is close to Pelosi's visit date
+    days_difference = abs((peak_date - pelosi_visit_date).days)
     logger.info(f"Days between peak and Pelosi's visit: {days_difference}")
 
-    if days_difference <= 2:
+    if days_difference <= 2: # Peak within 2 days before/after
         logger.info(
-            "✓ CONFIRMED: The GPR index peaked around Nancy Pelosi's visit to Taiwan"
+            "✓ CONFIRMED: The daily GPR count peaked around Nancy Pelosi's visit to Taiwan"
         )
     else:
         logger.info(
-            "⚠ NOT CONFIRMED: The GPR peak was not closely aligned with Pelosi's visit"
+            "⚠ NOT CONFIRMED: The daily GPR count peak was not closely aligned with Pelosi's visit"
         )
 else:
     logger.info("No data available for the period of Nancy Pelosi's visit")
 
+
+# %% [markdown]
+# ## Analysis 2: Newspaper Comparison (Weekly Counts)
+# We query the calculator to get weekly counts grouped by newspaper.
+
 # %%
-# ANALYSIS 2: Compare trends across different newspapers
-logger.info("Analyzing GPR trends by newspaper...")
-# Initialize GPR analyzer
-gpr_analyzer = GPRAnalyzer(output_dir=os.path.join(OUTPUT_DIR, "newspaper_analysis"))
+# ANALYSIS 2: Newspaper Comparison (Weekly Counts - Plot 4)
+logger.info("Analyzing GPR trends by newspaper (Weekly Counts - Plot 4)...")
 
-# Calculate GPR indices for each newspaper
-newspapers = articles_df["newspaper"].unique().to_list()
-newspaper_gpr = {}
-newspaper_en_map = {}
-
-for newspaper in newspapers:
-    # Get English name
-    en_name = NEWSPAPER_MAP.get(newspaper, newspaper)
-    newspaper_en_map[newspaper] = en_name
-    logger.info(f"Processing newspaper: {newspaper} (English: {en_name})")
-
-    # Filter articles for this newspaper
-    newspaper_articles = articles_df.filter(pl.col("newspaper") == newspaper)
-
-    # Convert to dictionary format expected by GPRCalculator
-    newspaper_articles_dict = {}
-    for date in newspaper_articles["date"].unique():
-        date_str = date.strftime("%Y-%m-%d")
-        newspaper_articles_dict[date_str] = {}
-
-        date_newspaper_articles = newspaper_articles.filter(pl.col("date") == date)
-        for row in date_newspaper_articles.iter_rows(named=True):
-            newspaper_articles_dict[date_str][row["id"]] = row["content"]
-
-    # Skip if no articles
-    if not any(newspaper_articles_dict.values()):
-        logger.info(f"No articles for {newspaper}, skipping")
-        continue
-
-    # Calculate GPR indices for this newspaper
-    newspaper_gpr[newspaper] = gpr_calculator.calculate_index_series(
-        newspaper_articles_dict
+# Calculate weekly GPR counts grouped by newspaper_en using the calculator
+logger.info("Querying weekly GPR counts by newspaper...")
+try:
+    # Use 'newspaper_en' for grouping as added during prepare step
+    newspaper_weekly_pl = gpr_calculator.query(
+        group_by_cols=['date', 'newspaper_en'],
+        time_bucket='W', # Get weekly buckets
+        time_col='date'     # Specify the time column
     )
-    logger.info(
-        f"Calculated indices for {len(newspaper_gpr[newspaper])} dates for {newspaper}"
-    )
+    logger.info(f"Weekly newspaper query successful. Shape: {newspaper_weekly_pl.shape}")
+
+    # --- Convert Polars results to Pandas for existing plotting/analysis code ---
+    if not newspaper_weekly_pl.is_empty():
+        # Rename category columns (e.g., war_threat_count -> war_threat)
+        rename_mapping = {f"{cat}_count": cat for cat in gpr_calculator.category_definitions.keys()}
+        newspaper_weekly_pl = newspaper_weekly_pl.rename(rename_mapping)
+
+        # Assume the time column is named 'date_bucketed' after query with time_bucket
+        time_col_name = 'date_bucketed'
+        if time_col_name not in newspaper_weekly_pl.columns:
+             raise KeyError(f"Expected time bucket column '{time_col_name}' not found.")
+
+        # Pivot the data to get newspapers as columns (suitable for comparison plot & correlation)
+        # Overall Index Comparison DF
+        comparison_df_weekly_pivoted_pl = newspaper_weekly_pl.pivot(
+            index=time_col_name,
+            columns='newspaper_en',
+            values='overall_index'
+        )
+        # Convert to pandas and explicitly set the index
+        comparison_df_weekly = comparison_df_weekly_pivoted_pl.to_pandas().set_index(time_col_name).sort_index()
+        comparison_df_weekly.index.name = 'Date (Week Ending)' # Rename index for clarity
+        logger.info(f"Created overall weekly comparison DataFrame. Shape: {comparison_df_weekly.shape}")
+        logger.debug(f"Overall weekly comparison head:\\n{comparison_df_weekly.head()}")
+
+        # Military Buildup Comparison DF (Handle potential missing category)
+        if 'military_buildup' in newspaper_weekly_pl.columns:
+            comparison_mb_weekly_pivoted_pl = newspaper_weekly_pl.pivot(
+                index=time_col_name,
+                columns='newspaper_en',
+                values='military_buildup'
+            )
+            # Convert to pandas and explicitly set the index
+            comparison_mb_weekly = comparison_mb_weekly_pivoted_pl.to_pandas().set_index(time_col_name).sort_index()
+            comparison_mb_weekly.index.name = 'Date (Week Ending)'
+            logger.info(f"Created military buildup weekly comparison DataFrame. Shape: {comparison_mb_weekly.shape}")
+            logger.debug(f"Military buildup weekly comparison head:\\n{comparison_mb_weekly.head()}")
+        else:
+            logger.warning("'military_buildup' column not found in query result. Cannot create military buildup comparison.")
+            comparison_mb_weekly = pd.DataFrame() # Empty DF
+
+    else:
+        logger.warning("Weekly newspaper query returned empty results.")
+        comparison_df_weekly = pd.DataFrame()
+        comparison_mb_weekly = pd.DataFrame()
+
+except Exception as e:
+    logger.error(f"Error during weekly newspaper analysis: {e}")
+    comparison_df_weekly = pd.DataFrame()
+    comparison_mb_weekly = pd.DataFrame()
+
 
 # %%
-# Prepare comparison dataframe for plotting with English names
-comparison_df = None
-for newspaper, gpr in newspaper_gpr.items():
-    en_name = newspaper_en_map[newspaper]
-    if comparison_df is None:
-        comparison_df = gpr[["overall_index"]].rename(
-            columns={"overall_index": en_name}
-        )
-    else:
-        comparison_df[en_name] = gpr["overall_index"]
+# Prepare comparison dataframe for plotting (Weekly Counts) - This is now done above via pivot
 
-# %%
-# Calculate correlations between newspapers to check for similar trends
-if comparison_df is not None and len(comparison_df.columns) > 1:
-    correlation_matrix = comparison_df.corr()
+# >>> Correlation Analysis (Overall Weekly Counts) <<<
+# This part should work correctly with the pivoted comparison_df_weekly
+if not comparison_df_weekly.empty and len(comparison_df_weekly.columns) > 1:
+    logger.info("Calculating correlations based on Overall Weekly Counts...")
 
-    # Calculate average correlation for each newspaper
-    avg_correlations = correlation_matrix.mean()
-    logger.info("Average correlation with other newspapers:")
-    logger.info(avg_correlations)
-
-    # Check if correlations are high (above 0.5)
-    high_corr = avg_correlations[avg_correlations > 0.5]
-    if len(high_corr) / len(avg_correlations) > 0.5:
-        logger.info(
-            "✓ CONFIRMED: Different newspapers show similar GPR trends (high correlation)"
-        )
-    else:
-        logger.info(
-            "⚠ NOT CONFIRMED: Newspapers show divergent GPR trends (low correlation)"
-        )
-
-    # Plot the correlation matrix
+    # --- Pearson Correlation ---
+    correlation_pearson = comparison_df_weekly.corr(method='pearson')
+    logger.info("--- Pearson Correlation Matrix (Overall Weekly Counts) ---")
+    logger.info(f"\n{correlation_pearson}")
+    # Plot Pearson heatmap
     plt.figure(figsize=(10, 8))
-    sns.heatmap(correlation_matrix, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
-    plt.title("Correlation Between Newspapers' GPR Indices")
+    sns.heatmap(correlation_pearson, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
+    plt.title("Pearson Correlation - Newspapers' Overall Weekly GPR Counts")
     plt.tight_layout()
-    plt.savefig(
-        os.path.join(OUTPUT_DIR, "newspaper_correlation.png")
-    )  # Save to output directory
-    plt.close()  # Close the figure
+    plt.savefig(os.path.join(OUTPUT_DIR, "newspaper_correlation_pearson_weekly_overall.png"))
+    plt.close()
 
-    # Plot the GPR indices by newspaper
+    # --- Spearman Correlation ---
+    correlation_spearman = comparison_df_weekly.corr(method='spearman')
+    logger.info("--- Spearman Correlation Matrix (Overall Weekly Counts) ---")
+    logger.info(f"\n{correlation_spearman}")
+    # Plot Spearman heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(correlation_spearman, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
+    plt.title("Spearman Correlation - Newspapers' Overall Weekly GPR Counts")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "newspaper_correlation_spearman_weekly_overall.png"))
+    plt.close()
+
+else:
+    logger.info("Not enough weekly data available to calculate overall newspaper correlations.")
+# >>> End Correlation Analysis (Overall) <<<
+
+# %%
+# Plot the Weekly GPR Counts by newspaper (Plot 4)
+# This should work with the pivoted comparison_df_weekly
+if not comparison_df_weekly.empty:
+    logger.info("Plotting Weekly GPR Counts by Newspaper (Plot 4)...")
     plt.figure(figsize=(14, 7))
-    for newspaper in comparison_df.columns:
-        # Resample to monthly for clearer visualization
-        comparison_df[newspaper].resample("M").mean().plot(label=newspaper)
-    plt.title("GPR Index by Newspaper")
-    plt.xlabel("Date")
-    plt.ylabel("Index Value")
+    for newspaper_col in comparison_df_weekly.columns:
+        comparison_df_weekly[newspaper_col].plot(label=newspaper_col)
+    plt.title("Weekly GPR Counts by Newspaper")
+    plt.xlabel("Date (Week Ending)")
+    plt.ylabel("Number of Articles")
     plt.legend()
     plt.tight_layout()
     plt.savefig(
-        os.path.join(OUTPUT_DIR, "newspaper_gpr_trends.png")
-    )  # Save to output directory
-    plt.close()  # Close the figure
+        os.path.join(OUTPUT_DIR, "newspaper_gpr_trends_weekly_counts.png")
+    )
+    plt.close()
 else:
-    logger.info("Not enough data to compare newspapers")
+    logger.info("No weekly data available to plot newspaper comparison.")
 
 # %%
-# ANALYSIS 3: Check if military buildup dominates other categories
-logger.info("Analyzing category dominance...")
-
-# Extract category indices data with focus on the correct categories
-category_indices = {}
-for idx, row in gpr_indices.iterrows():
-    # Handle potential missing data gracefully
-    cat_indices = row.get("category_indices", {})
-    if isinstance(cat_indices, dict):
-        for category, value in cat_indices.items():
-            # Only include the correct categories
-            if category in CORRECT_CATEGORIES:
-                if category not in category_indices:
-                    category_indices[category] = []
-                category_indices[category].append((idx, value))
-    elif cat_indices is not None:
-        logger.warning(
-            f"Unexpected category_indices type for date {idx}: {type(cat_indices)}"
-        )
-
-# Log the categories found
-found_categories = list(category_indices.keys())
-logger.info(f"Found data for categories: {found_categories}")
-missing_categories = [cat for cat in CORRECT_CATEGORIES if cat not in found_categories]
-if missing_categories:
-    logger.warning(f"No data found for categories: {missing_categories}")
-
-# Convert to dataframes
-category_dfs = {}
-for category, values in category_indices.items():
-    if values:
-        df = pl.DataFrame(
-            {"date": [v[0] for v in values], "value": [v[1] for v in values]}
-        ).with_columns(pl.col("date").cast(pl.Date))
-        category_dfs[category] = df
-        logger.info(f"Created dataframe for {category} with {len(df)} rows")
-
-# Calculate average index value for each category
-category_avgs = {category: df["value"].mean() for category, df in category_dfs.items()}
-sorted_categories = sorted(category_avgs.items(), key=lambda x: x[1], reverse=True)
-
-logger.info("Categories by average GPR contribution:")
-for category, avg in sorted_categories:
-    logger.info(f"{category}: {avg:.6f}")
-
-# Check if military categories dominate
-military_categories = ["military_buildup"]
-if military_categories:
-    military_avg = sum(category_avgs.get(cat, 0) for cat in military_categories) / len(
-        military_categories
-    )
-    non_military_categories = [
-        cat for cat in category_avgs.keys() if cat not in military_categories
-    ]
-    non_military_avg = (
-        sum(category_avgs[cat] for cat in non_military_categories)
-        / len(non_military_categories)
-        if non_military_categories
-        else 0
-    )
-
-    logger.info(f"\nAverage military GPR: {military_avg:.6f}")
-    logger.info(f"Average non-military GPR: {non_military_avg:.6f}")
-
-    if military_avg > non_military_avg:
-        ratio = (
-            military_avg / non_military_avg if non_military_avg > 0 else float("inf")
-        )
-        logger.info(f"Military/Non-military ratio: {ratio:.2f}")
-
-        if ratio > 1.5:
-            logger.info("✓ CONFIRMED: Military buildup dominates other categories")
-        else:
-            logger.info(
-                "⚠ PARTIALLY CONFIRMED: Military categories are higher but not strongly dominant"
-            )
-    else:
-        logger.info("⚠ NOT CONFIRMED: Military categories do not dominate")
-
-# Plot categories over time
-plt.figure(figsize=(14, 7))
-for category, df in category_dfs.items():
-    if category == "military_buildup":
-        # Highlight military categories
-        plt.plot(df["date"], df["value"], linewidth=2, label=category)
-    else:
-        plt.plot(df["date"], df["value"], linewidth=1, alpha=0.7, label=category)
-plt.title("GPR Categories Over Time")
-plt.xlabel("Date")
-plt.ylabel("Index Value")
-plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
-plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT_DIR, "category_trends.png"))  # Save to output directory
-plt.close()  # Close the figure
+# Prepare comparison dataframe for Military Buildup (Weekly Counts) - Done above via pivot
 
 # %%
-# Plot stacked area chart of category composition
-# First, convert to pandas for easier plotting
-category_data = {}
-for category, df in category_dfs.items():
-    pandas_df = df.to_pandas()
-    pandas_df.set_index("date", inplace=True)
-    category_data[category] = pandas_df["value"]
+# >>> Correlation Analysis (Military Buildup Weekly Counts) <<<
+# This should work with the pivoted comparison_mb_weekly
+if not comparison_mb_weekly.empty and len(comparison_mb_weekly.columns) > 1:
+    logger.info("Calculating correlations based on Military Buildup Weekly Counts...")
 
-if category_data:
-    category_panel = pd.DataFrame(category_data)
+    # --- Pearson Correlation ---
+    mb_correlation_pearson = comparison_mb_weekly.corr(method='pearson')
+    logger.info("--- Pearson Correlation Matrix (Military Buildup Weekly Counts) ---")
+    logger.info(f"\n{mb_correlation_pearson}")
+    # Plot Pearson heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(mb_correlation_pearson, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
+    plt.title("Pearson Correlation - Newspapers' Weekly Military Buildup Counts")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "newspaper_correlation_pearson_weekly_mb.png"))
+    plt.close()
 
-    # Fill NaN values with 0
-    category_panel = category_panel.fillna(0)
+    # --- Spearman Correlation ---
+    mb_correlation_spearman = comparison_mb_weekly.corr(method='spearman')
+    logger.info("--- Spearman Correlation Matrix (Military Buildup Weekly Counts) ---")
+    logger.info(f"\n{mb_correlation_spearman}")
+    # Plot Spearman heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(mb_correlation_spearman, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
+    plt.title("Spearman Correlation - Newspapers' Weekly Military Buildup Counts")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "newspaper_correlation_spearman_weekly_mb.png"))
+    plt.close()
 
-    # Resample to monthly for clearer visualization
-    category_monthly = category_panel.resample("M").mean()
+else:
+    logger.info("Not enough weekly data available to calculate military buildup newspaper correlations.")
+# >>> End Correlation Analysis (Military Buildup) <<<
 
-    # Plot stacked area chart
+# %%
+# Plot the Weekly Military Buildup Counts by newspaper (New Plot)
+# This should work with the pivoted comparison_mb_weekly
+if not comparison_mb_weekly.empty:
+    logger.info("Plotting Weekly Military Buildup Counts by Newspaper...")
     plt.figure(figsize=(14, 7))
-    category_monthly.plot.area(stacked=True)
-    plt.title("Composition of GPR Index Over Time")
-    plt.xlabel("Date")
-    plt.ylabel("Index Value")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    for newspaper_col in comparison_mb_weekly.columns:
+        comparison_mb_weekly[newspaper_col].plot(label=newspaper_col)
+    plt.title("Weekly Military Buildup Counts by Newspaper")
+    plt.xlabel("Date (Week Ending)")
+    plt.ylabel("Number of Articles")
+    plt.legend()
     plt.tight_layout()
     plt.savefig(
-        os.path.join(OUTPUT_DIR, "stacked_categories.png")
-    )  # Save to output directory
-    plt.close()  # Close the figure
+        os.path.join(OUTPUT_DIR, "newspaper_military_buildup_weekly_counts.png")
+    )
+    plt.close()
+else:
+    logger.info("No weekly military buildup data available to plot newspaper comparison.")
 
-    # Plot average contribution of each category
-    plt.figure(figsize=(10, 6))
-    category_panel.mean().sort_values(ascending=False).plot(kind="bar")
-    plt.title("Average Contribution by Category")
-    plt.ylabel("Average Index Value")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(OUTPUT_DIR, "category_contributions.png")
-    )  # Save to output directory
-    plt.close()  # Close the figure
+# %% [markdown]
+# ## Analysis 3: Category Contribution (Weekly Counts)
+# We query the calculator again to get weekly counts aggregated across all newspapers.
+
+# %%
+# ANALYSIS 3: Category Analysis (Weekly Counts - Plot 3)
+logger.info("Analyzing category contributions (Weekly Counts - Plot 3)...")
+
+# Query for weekly counts, grouped only by date
+logger.info("Querying weekly GPR counts by category (all newspapers)...")
+try:
+    category_weekly_pl = gpr_calculator.query(
+        group_by_cols=['date'],
+        time_bucket='W', # Weekly buckets
+        time_col='date'
+    )
+    logger.info(f"Weekly category query successful. Shape: {category_weekly_pl.shape}")
+
+    if not category_weekly_pl.is_empty():
+         # Rename category columns (e.g., war_threat_count -> war_threat)
+         rename_mapping = {f"{cat}_count": cat for cat in gpr_calculator.category_definitions.keys()}
+         category_weekly_pl = category_weekly_pl.rename(rename_mapping)
+
+         # Assume time column is 'date_bucketed'
+         time_col_name = 'date_bucketed'
+         if time_col_name not in category_weekly_pl.columns:
+              raise KeyError(f"Expected time bucket column '{time_col_name}' not found.")
+
+         # Convert to pandas and set index
+         category_weekly_sums = category_weekly_pl.to_pandas().set_index(time_col_name).sort_index()
+         category_weekly_sums.index.name = 'Date (Week Ending)' # Rename index for clarity
+         logger.info(f"Created weekly category sums DataFrame. Shape: {category_weekly_sums.shape}")
+         logger.debug(f"Weekly category sums head:\n{category_weekly_sums.head()}")
+
+    else:
+         logger.warning("Weekly category query returned empty results.")
+         category_weekly_sums = pd.DataFrame()
+
+
+except Exception as e:
+    logger.error(f"Error during weekly category analysis: {e}")
+    category_weekly_sums = pd.DataFrame()
+
+
+# Use the new category_weekly_sums DataFrame for analysis
+if not category_weekly_sums.empty:
+    # The rest of the dominance analysis and plotting code remains largely the same,
+    # using the 'category_weekly_sums' pandas DataFrame.
+    present_category_columns = [col for col in category_weekly_sums.columns if col != 'overall_index']
+
+    if not present_category_columns:
+        logger.warning("No category columns found in the weekly data for dominance analysis.")
+    else:
+        logger.info(f"Analyzing categories: {present_category_columns}")
+        # category_weekly_sums = gpr_indices_weekly_sum[present_category_columns] # No longer needed
+
+        # Calculate average weekly count for each category
+        category_avg_weekly_counts = category_weekly_sums[present_category_columns].mean()
+        sorted_categories = category_avg_weekly_counts.sort_values(ascending=False)
+
+        logger.info("Categories by average weekly GPR count:")
+        logger.info(sorted_categories)
+
+        # Check if military categories dominate (based on average weekly counts)
+        military_categories = [cat for cat in ["military_buildup"] if cat in present_category_columns]
+        if military_categories:
+            spearman = category_avg_weekly_counts[military_categories].mean()
+            non_military_categories = [
+                cat for cat in present_category_columns if cat not in military_categories
+            ]
+            non_military_avg = (
+                category_avg_weekly_counts[non_military_categories].mean()
+                if non_military_categories
+                else 0
+            )
+
+            logger.info(f"\nAverage weekly military count: {military_avg:.6f}")
+            logger.info(f"Average weekly non-military count: {non_military_avg:.6f}")
+
+            if military_avg > non_military_avg:
+                ratio = military_avg / non_military_avg if non_military_avg > 1e-9 else float("inf")
+                logger.info(f"Military/Non-military ratio: {ratio:.2f}")
+                if ratio > 1.5:
+                    logger.info("✓ CONFIRMED: Military buildup dominates other categories (based on avg weekly count)")
+                else:
+                    logger.info("⚠ PARTIALLY CONFIRMED: Military categories higher but not strongly dominant")
+            else:
+                logger.info("⚠ NOT CONFIRMED: Military categories do not dominate")
+        else:
+            logger.warning("Military category 'military_buildup' not found in data for dominance check.")
+
+        # Plot categories over time (Weekly Counts)
+        logger.info("Plotting Weekly GPR Counts by Category (Plot 3)...")
+        plt.figure(figsize=(14, 7))
+        for category in present_category_columns:
+            plt.plot(category_weekly_sums.index, category_weekly_sums[category], label=category)
+        plt.title("Weekly GPR Counts by Category")
+        plt.xlabel("Date (Week Ending)")
+        plt.ylabel("Number of Articles")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, "category_trends_weekly_counts.png"))
+        plt.close()
+
+        # Plot stacked area chart (Weekly Counts)
+        category_weekly_sums[present_category_columns].fillna(0).plot.area(stacked=True, figsize=(14, 7)) # Ensure only category cols are stacked
+        plt.title("Composition of GPR Index Over Time (Weekly Counts)")
+        plt.xlabel("Date (Week Ending)")
+        plt.ylabel("Number of Articles")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, "stacked_categories_weekly_counts.png"))
+        plt.close()
+
+        # Plot average weekly count by category
+        plt.figure(figsize=(10, 6))
+        category_avg_weekly_counts.sort_values(ascending=False).plot(kind="bar")
+        plt.title("Average Weekly Count by Category")
+        plt.ylabel("Average Weekly Article Count")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, "category_contributions_weekly_counts.png"))
+        plt.close()
+else:
+    logger.warning("Weekly category sums DataFrame is empty. Skipping category analysis.")
+
+# %% [markdown]
+# ## Analysis 4: Lau's Normalized Monthly Index
+# We query the calculator for monthly counts and apply normalization.
+
+# %%
+# ANALYSIS 4: Prepare Lau's Normalized Monthly Index for later comparison (Plot 5)
+logger.info("Calculating Lau's Normalized Monthly Index...")
+
+# Query for monthly counts, grouped only by date
+logger.info("Querying monthly GPR counts (all newspapers)...")
+try:
+    monthly_gpr_pl = gpr_calculator.query(
+        group_by_cols=['date'],
+        time_bucket='M', # Monthly buckets
+        time_col='date'
+    )
+    logger.info(f"Monthly query successful. Shape: {monthly_gpr_pl.shape}")
+
+    if not monthly_gpr_pl.is_empty():
+        # Assume time column is 'date_bucketed'
+        time_col_name = 'date_bucketed'
+        if time_col_name not in monthly_gpr_pl.columns:
+             raise KeyError(f"Expected time bucket column '{time_col_name}' not found.")
+
+        # Convert to pandas Series (overall_index) with date index
+        gpr_indices_monthly_sum_series = monthly_gpr_pl.to_pandas().set_index(time_col_name)['overall_index'].sort_index()
+        gpr_indices_monthly_sum_series.index.name = 'Date (Month Ending)'
+        logger.info(f"Created monthly sum series. Length: {len(gpr_indices_monthly_sum_series)}")
+
+        # --- Apply Lau Normalization ---
+        mean_monthly_count = gpr_indices_monthly_sum_series.mean()
+        std_monthly_count = gpr_indices_monthly_sum_series.std()
+        logger.info(f"Original Monthly Index (Sum): Mean={mean_monthly_count:.6f}, StdDev={std_monthly_count:.6f}")
+
+        lau_normalized_monthly_index = pd.Series(dtype=float) # Initialize empty series
+        if std_monthly_count > 1e-9:
+            lau_normalized_monthly_index = (
+                (gpr_indices_monthly_sum_series - mean_monthly_count) / std_monthly_count
+            ) + mean_monthly_count # Add mean back
+
+            final_mean = lau_normalized_monthly_index.mean()
+            final_std = lau_normalized_monthly_index.std()
+            logger.info(f"Lau's Normalized Monthly Index: Mean={final_mean:.6f}, StdDev={final_std:.6f}")
+            logger.info("(Mean is preserved, StdDev is rescaled relative to original mean)") # Clarified description
+        else:
+            logger.warning("StdDev of monthly counts zero. Cannot normalize. Using original mean value.")
+            lau_normalized_monthly_index = pd.Series(mean_monthly_count, index=gpr_indices_monthly_sum_series.index)
+        # --- End Normalization ---
+
+    else:
+        logger.warning("Monthly GPR query returned empty results. Cannot calculate Lau normalized index.")
+        lau_normalized_monthly_index = pd.Series(dtype=float)
+
+except Exception as e:
+    logger.error(f"Error during monthly analysis for Lau normalization: {e}")
+    lau_normalized_monthly_index = pd.Series(dtype=float)
+
+
+# --- Placeholder for Plot 5 (remains the same) ---
+# logger.info("Plot 5 (Monthly Comparison) skipped: Caldara index not yet provided.")
+# if not lau_normalized_monthly_index.empty:
+# ... (plotting code remains the same) ...
+# --- End Placeholder ---
 
 # %% [markdown]
 # ## Summary of Findings

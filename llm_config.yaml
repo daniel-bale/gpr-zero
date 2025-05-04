@@ -1,0 +1,21 @@
+# LLM configuration for GPR-Zero project
+
+# Model configuration
+models:
+  default: "gpt-4o-2024-08-06"
+  options:
+    - "gpt-4.5-preview-2025-02-27"
+    - "gpt-4o-2024-08-06"
+    - "o1-2024-12-17"
+    - "o3-mini-2025-01-31"
+  
+# Generation parameters  
+generation:
+  temperature: 0.0
+  max_tokens: 2000
+  
+# Web search capability
+web_search:
+  enabled: true
+  supported_models:
+    - "gpt-4o-2024-08-06"  # Currently only GPT-4o supports web search 

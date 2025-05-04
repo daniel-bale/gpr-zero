@@ -62,7 +62,7 @@ def read_rtf_file(file_path: str) -> str:
         logger.info(f"Reading RTF file: {file_path}")
 
         # Method 1: Use striprtf library (faster but simpler)
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(file_path, "r", encoding="big5", errors="replace") as f:
             rtf_text = f.read()
             text = rtf_to_text(rtf_text)
 
@@ -100,7 +100,7 @@ def read_rtf_file(file_path: str) -> str:
                     return text  # Return the original striprtf output as last resort
 
             # Read the converted text file
-            with open(temp_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(temp_path, "r", encoding="big5", errors="replace") as f:
                 text = f.read()
 
             # Clean up temporary file
@@ -120,6 +120,23 @@ def parse_rtf_file(file_path: str) -> list:
     """Parse an RTF file and return a list of article dictionaries."""
     logger.info(f"Parsing RTF file: {file_path}")
     articles = []
+    
+    # --- Determine Category from Filename ---
+    filename = os.path.basename(file_path)
+    file_category = ""
+    if filename.startswith("LT-military_buildup_"):
+        file_category = "military_buildup"
+    elif filename.startswith("LT-war_threat"):
+        file_category = "war_threat"
+    elif filename.startswith("LT-war_begin"):
+        file_category = "war_begin"
+    elif filename.startswith("LT-peace_threat"):
+        file_category = "peace_threat"
+    else:
+        logger.warning(f"Could not determine category from filename: {filename}")
+    if file_category:
+        logger.info(f"Determined category '{file_category}' from filename.")
+    # --- End Category Determination ---
 
     try:
         # Read RTF file and convert to text
@@ -291,24 +308,32 @@ def parse_rtf_file(file_path: str) -> list:
 
                     content_text = clean_content("\n".join(content_lines))
 
-                    # Create article dictionary
-                    if headline and content_text:
-                        article = {
-                            "id": article_id,
-                            "newspaper": newspaper,
-                            "date": date_str,
-                            "page": "",  # Not available
-                            "category": "",  # Not available
-                            "author": "",  # Not available
-                            "headline": headline,
-                            "content": content_text,
-                            "source_file": os.path.basename(file_path),
-                        }
+                    # --- Handle Missing Content & Assign Category ---
+                    if content_text.strip() == "missing content":
+                        logger.warning(f"Detected 'missing content' marker for article {article_id}")
+                        content_text = "" # Set content to empty string
+                        
+                    # Use category derived from filename, overriding any parsed category
+                    final_category = file_category
+                    # --- End Handling ---
 
-                        articles.append(article)
-                        logger.debug(
-                            f"Extracted article {article_num} with ID {article_id}: {headline[:30]}..."
-                        )
+                    # Create the article dictionary
+                    article = {
+                        "id": article_id,
+                        "newspaper": paper,
+                        "date": date_str,
+                        "page": "",  # Not available
+                        "category": final_category, # Use the final category
+                        "author": "",  # Not available
+                        "headline": headline,
+                        "content": content_text, # Use potentially modified content_text
+                        "source_file": os.path.basename(file_path),
+                    }
+
+                    articles.append(article)
+                    logger.debug(
+                        f"Extracted article {article_num} with ID {article_id}: {headline[:30]}..."
+                    )
 
                 # We've processed with the Liberty Times specific approach
                 found_articles = True

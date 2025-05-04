@@ -1,195 +1,148 @@
 #!/usr/bin/env python3
-"""Main entry point for the GPR-Zero project."""
+"""Main entry point for GPR-Zero."""
 
 import argparse
 import logging
 import sys
+import os
+from pathlib import Path
 
-from gpr_zero.llm.prompt_manager import PromptManager
-from gpr_zero.llm.dictionary_generator import DictionaryGenerator
+import yaml
+
+from src.gpr_zero.llm.prompt_manager import PromptManager
+from src.gpr_zero.llm.dictionary_generator import DictionaryGenerator
 from gpr_zero.llm.news_classifier import NewsClassifier
 from gpr_zero.gpr_index.calculator import GPRCalculator
 from gpr_zero.gpr_index.analyzer import GPRAnalyzer
 from gpr_zero.utils.data_loader import NewsDataLoader
 
 
-def setup_logging():
+def setup_logging(log_level: str = "INFO") -> None:
     """Set up logging configuration."""
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
+    
     logging.basicConfig(
-        level=logging.INFO,
+        level=numeric_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler("gpr_zero.log")],
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="GPR-Zero: Improving Geopolitical Risk Assessment"
+def load_config(config_path: str = "llm_config.yaml") -> dict:
+    """Load configuration from YAML file.
+    
+    Args:
+        config_path: Path to the configuration file
+        
+    Returns:
+        Configuration dictionary
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logging.error(f"Error loading configuration: {e}")
+        sys.exit(1)
+
+
+def generate_dictionary_command(args) -> None:
+    """Generate a dictionary using the specified strategy.
+    
+    Args:
+        args: Command line arguments
+    """
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Setup logging
+    setup_logging(args.log_level)
+    
+    # Get model configuration
+    model_config = config.get("models", {})
+    default_model = model_config.get("default", "gpt-4o-2024-08-06")
+    available_models = model_config.get("options", [default_model])
+    
+    # Validate the model if specified by user
+    if args.model and args.model not in available_models:
+        logging.error(f"Error: Model '{args.model}' not found in available models.")
+        logging.info(f"Available models: {', '.join(available_models)}")
+        sys.exit(1)
+    model_name = args.model or default_model
+    
+    # Setup generation parameters
+    gen_params = config.get("generation", {})
+    temperature = gen_params.get("temperature", 0.0)
+    
+    # Initialize prompt manager
+    prompt_manager = PromptManager(
+        model_name=model_name,
+        temperature=temperature,
+        log_dir=args.log_dir,
+        prompts_dir=args.prompts_dir
     )
-
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
-
-    # Dictionary generation command
-    dict_parser = subparsers.add_parser(
-        "generate-dictionary", help="Generate GPR keyword dictionary"
+    
+    # Initialize dictionary generator
+    dictionary_generator = DictionaryGenerator(
+        prompt_manager=prompt_manager,
+        output_dir=args.output_dir,
+        reference_dictionary_path=args.reference_dict
     )
-    dict_parser.add_argument(
-        "--strategy",
-        choices=["direct", "translation", "guided"],
-        default="direct",
-        help="Strategy for dictionary generation",
-    )
-    dict_parser.add_argument("--output", help="Output file name")
-
-    # Index calculation command
-    index_parser = subparsers.add_parser("calculate-index", help="Calculate GPR index")
-    index_parser.add_argument(
-        "--dictionary", required=True, help="Path to dictionary file"
-    )
-    index_parser.add_argument("--source", required=True, help="News source name")
-    index_parser.add_argument("--start-date", help="Start date (YYYY-MM-DD)")
-    index_parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
-    index_parser.add_argument(
-        "--normalize", action="store_true", help="Normalize by total articles"
-    )
-    index_parser.add_argument("--output", help="Output file name")
-
-    # LLM classification command
-    classify_parser = subparsers.add_parser(
-        "classify", help="Classify articles using LLM"
-    )
-    classify_parser.add_argument("--source", required=True, help="News source name")
-    classify_parser.add_argument("--start-date", help="Start date (YYYY-MM-DD)")
-    classify_parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
-    classify_parser.add_argument("--limit", type=int, help="Limit number of articles")
-
-    # Analysis command
-    analyze_parser = subparsers.add_parser(
-        "analyze", help="Analyze and compare indices"
-    )
-    analyze_parser.add_argument(
-        "--indices", required=True, nargs="+", help="List of index files to compare"
-    )
-    analyze_parser.add_argument("--names", nargs="+", help="Names for the indices")
-    analyze_parser.add_argument(
-        "--output-dir", default="data/analysis", help="Directory for analysis outputs"
-    )
-
-    return parser.parse_args()
-
-
-def main():
-    """Main entry point."""
-    setup_logging()
-    args = parse_args()
-
-    logger = logging.getLogger("main")
-    logger.info(f"Running command: {args.command}")
-
-    if args.command == "generate-dictionary":
-        prompt_manager = PromptManager()
-        generator = DictionaryGenerator(prompt_manager=prompt_manager)
-
-        dictionary = generator.generate_dictionary(
-            strategy=args.strategy, name=args.output
+    
+    # Generate dictionary using the specified strategy
+    if args.strategy == "direct":
+        dictionary_generator.generate_direct(
+            prompt_file=args.prompt_file,
+            output_name=args.output_name
         )
-
-        logger.info(
-            f"Generated dictionary with {sum(len(v) for v in dictionary.values())} keywords"
+    elif args.strategy == "translation":
+        dictionary_generator.generate_translation(
+            prompt_file=args.prompt_file,
+            reference_path=args.reference_dict,
+            output_name=args.output_name
         )
-
-    elif args.command == "calculate-index":
-        data_loader = NewsDataLoader()
-        calculator = GPRCalculator(dictionary_path=args.dictionary)
-
-        # Load articles
-        articles_df = data_loader.load_articles(
-            source=args.source, start_date=args.start_date, end_date=args.end_date
+    elif args.strategy == "guided":
+        dictionary_generator.generate_guided(
+            prompt_file=args.prompt_file,
+            output_name=args.output_name
         )
-
-        # Group by date
-        articles_by_date = data_loader.group_by_date(articles_df)
-
-        # Get total articles if normalizing
-        total_articles_by_date = None
-        if args.normalize:
-            total_articles_by_date = data_loader.get_total_articles_by_date(
-                source=args.source, start_date=args.start_date, end_date=args.end_date
-            )
-
-        # Calculate index
-        index_df = calculator.calculate_index_series(
-            articles_by_date=articles_by_date,
-            normalize=args.normalize,
-            total_articles_by_date=total_articles_by_date,
-        )
-
-        # Save index
-        output_name = args.output or f"gpr_index_{args.source}"
-        calculator.save_index(index_df, output_name)
-
-        logger.info(f"Calculated index for {len(articles_by_date)} dates")
-
-    elif args.command == "classify":
-        data_loader = NewsDataLoader()
-        prompt_manager = PromptManager()
-        classifier = NewsClassifier(prompt_manager=prompt_manager)
-
-        # Load articles
-        articles_df = data_loader.load_articles(
-            source=args.source,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            limit=args.limit,
-        )
-
-        # Prepare batch
-        articles_batch = {}
-        for _, row in articles_df.iterrows():
-            articles_batch[str(row["id"])] = row["text"]
-
-        # Classify
-        results = classifier.batch_classify(articles_batch)
-
-        logger.info(f"Classified {len(results)} articles")
-
-    elif args.command == "analyze":
-        analyzer = GPRAnalyzer(output_dir=args.output_dir)
-
-        # Load indices
-        index_paths = {}
-        if args.names and len(args.names) == len(args.indices):
-            for name, path in zip(args.names, args.indices):
-                index_paths[name] = path
-        else:
-            for i, path in enumerate(args.indices):
-                index_paths[f"index_{i + 1}"] = path
-
-        indices = analyzer.load_indices(index_paths)
-
-        # Compare indices
-        comparison_df = analyzer.compare_indices(indices)
-
-        # Plot comparison
-        analyzer.plot_indices(comparison_df)
-
-        # Calculate and plot correlation matrix
-        corr_matrix = analyzer.correlation_analysis(comparison_df)
-        analyzer.plot_correlation_matrix(corr_matrix)
-
-        # Find divergence points
-        divergence_df = analyzer.find_divergence_points(comparison_df)
-
-        logger.info(f"Analyzed {len(indices)} indices")
-        logger.info(f"Found {len(divergence_df)} significant divergence points")
-
     else:
-        logger.error(f"Unknown command: {args.command}")
-        return 1
+        logging.error(f"Unknown strategy: {args.strategy}")
+        sys.exit(1)
+    
+    logging.info(f"Dictionary generation completed using {args.strategy} strategy")
 
-    return 0
 
+def main() -> None:
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="GPR-Zero: GPR Dictionary Generation")
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument("--config", default="llm_config.yaml", help="Path to configuration file")
+    
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # Dictionary generation command
+    gen_parser = subparsers.add_parser("generate-dictionary", help="Generate a dictionary")
+    gen_parser.add_argument("--strategy", required=True, choices=["direct", "translation", "guided"], 
+                          help="Strategy for dictionary generation")
+    gen_parser.add_argument("--prompt-file", required=True, help="Prompt file to use (without .json extension)")
+    gen_parser.add_argument("--output-name", required=True, help="Output dictionary name (without .json extension)")
+    gen_parser.add_argument("--reference-dict", help="Path to reference dictionary for translation strategy")
+    gen_parser.add_argument("--model", help="Override the model specified in the config")
+    gen_parser.add_argument("--prompts-dir", default="prompts", help="Directory containing prompt templates")
+    gen_parser.add_argument("--output-dir", default="data/dictionaries", help="Directory to save generated dictionaries")
+    gen_parser.add_argument("--log-dir", default="logs/llm", help="Directory to save LLM logs")
+    
+    args = parser.parse_args()
+    
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+    
+    if args.command == "generate-dictionary":
+        generate_dictionary_command(args)
+    
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

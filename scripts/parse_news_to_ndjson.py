@@ -61,7 +61,7 @@ def parse_txt_file(file_path: str) -> list:
     newspaper = ""
 
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(file_path, "r", encoding="big5", errors="replace") as f:
             content = f.read()
 
         # Try to determine the newspaper from the header
@@ -147,39 +147,79 @@ def parse_txt_file(file_path: str) -> list:
                             category = meta_parts[2]
 
                         # Author info might be in the fourth part
-                        if len(meta_parts) > 3 and "By" in meta_parts[3]:
-                            author = meta_parts[3].replace("By", "").strip()
+                        if len(meta_parts) > 3:
+                            if "By" in meta_parts[3]:
+                                author = meta_parts[3].replace("By", "").strip()
+                            else:
+                                author = meta_parts[3].strip()
 
                 # Extract headline and content
                 headline = ""
-                content_lines = []
-                content_started = False
+                content_text = ""  # Initialize as empty string
+                headline_line_idx = -1
+                content_start_idx = -1
+                content_end_idx = len(lines)
 
-                for j, line in enumerate(lines[2:], 2):  # Skip the first two lines
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    # The first non-empty line after metadata is the headline
-                    if not headline and not content_started:
-                        headline = line
-                        continue
-
-                    content_started = True
-
-                    # Stop at the article ID or other markers
-                    if (
-                        "文章編號" in line
-                        or "[20" in line
-                        or line.startswith("----------")
-                    ):
+                # Find headline (first non-empty line after metadata - typically line index 2 or later)
+                for idx in range(2, min(10, len(lines))): # Search in first few lines
+                    line_strip = lines[idx].strip()
+                    if line_strip and not line_strip.startswith("--"):
+                        headline = line_strip
+                        headline_line_idx = idx
                         break
-
-                    content_lines.append(line)
-
-                content_text = clean_content("\n".join(content_lines))
-
+                
+                # Find content start (first meaningful line after headline and any separators)
+                if headline_line_idx != -1:
+                    for idx in range(headline_line_idx + 1, len(lines)):
+                        line_strip = lines[idx].strip()
+                        # Skip empty lines, separators, or potential leftover metadata
+                        if line_strip and not line_strip.startswith("--") and "|" not in line_strip:
+                            content_start_idx = idx
+                            break
+                
+                # Find end of content (look for start of next article or fallback markers)
+                if content_start_idx != -1:
+                    for idx in range(content_start_idx, len(lines)):
+                        line_strip = lines[idx].strip()
+                        # Primary end marker: start of next article (e.g., "2. ")
+                        if re.match(r"^\d+\.\s+", line_strip):
+                            content_end_idx = idx
+                            break
+                        # Fallback markers (allow them within content, check only at end?)
+                        # Let's rely on the next article marker for now.
+                        # if "文章編號" in lines[idx] or "[20" in lines[idx] or lines[idx].startswith("----------")
+                        #     content_end_idx = idx
+                        #     break
+                
+                # Extract content between start and end indices
+                if content_start_idx != -1 and content_end_idx > content_start_idx:
+                    content_lines = lines[content_start_idx:content_end_idx]
+                    content_text = clean_content("\n".join(content_lines))
+                
+                # Sometimes the fields are mixed up - newspapers appear to use different formats
+                # Fix common issues based on content of fields
+                
+                # If headline contains 'A' followed by digits, it's likely a page number
+                if headline and re.match(r'^A\d+', headline):
+                    if not page:
+                        page = headline
+                    
+                    # Shift everything: headline becomes category, category becomes author
+                    if category:
+                        headline = category
+                        category = ""
+                    
+                    # If we have an author but not headline, use author as headline
+                    if author and not headline:
+                        headline = author
+                        author = ""
+                
+                # If headline starts with a name (looks like an author), adjust
+                if headline and len(headline.split()) <= 3 and not author:
+                    author = headline
+                    headline = category if category else ""
+                    category = ""
+                
                 # Create the article dictionary
                 article = {
                     "id": article_id,
