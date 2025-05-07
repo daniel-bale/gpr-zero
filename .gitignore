@@ -177,3 +177,4 @@ fastwarc-deps/
 logs/
 *.csv
 .cursor/
+*.parquet

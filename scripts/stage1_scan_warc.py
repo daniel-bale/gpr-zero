@@ -3,48 +3,41 @@ import os
 import re
 import argparse
 import time
-import duckdb
 import logging
 import multiprocessing
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter
+import polars as pl
 from fastwarc.warc import ArchiveIterator, WarcRecordType, WarcRecord
 from fastwarc.stream_io import GZipStream, FileStream, FastWARCError # Assuming GZip, add LZ4 if needed
 from urllib.parse import urlparse
 from tqdm import tqdm
 
 # --- Constants ---
-INTERMEDIATE_DB_TABLE = "raw_html"
-# Example batch size, can be tuned
-INSERT_BATCH_SIZE = 1000
-# Example commit frequency (in terms of files processed), can be tuned
-FILES_PER_COMMIT = 5
-# Default log directory
+# Parquet output settings
+DEFAULT_OUTPUT_DIR = Path("./data/intermediate/stage1_parquet")
+# Removed INSERT_BATCH_SIZE, FILES_PER_COMMIT
 DEFAULT_LOG_DIR = Path("./logs/warc_extract/stage1")
-# Define intermediate DB schema (using TEXT for warc_id for flexibility, BLOB for content)
-INTERMEDIATE_SCHEMA = f"""
-    warc_id TEXT PRIMARY KEY,
-    warc_date TIMESTAMP,
-    url TEXT,
-    domain TEXT,
-    outlet TEXT,
-    html_content_bytes BLOB
-"""
+# Define expected columns for the output Parquet files (aligns with previous schema)
+OUTPUT_COLUMNS = [
+    'warc_id', 'warc_date', 'url', 'domain', 'outlet', 'is_english', 'html_content_bytes'
+]
 
 # --- Argument Parsing ---
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Stage 1: Scan WARC files, filter by domain, extract metadata and raw HTML bytes, store in intermediate DuckDB.",
+        description="Stage 1: Scan WARC files, filter by domain, extract metadata and raw HTML bytes, store in intermediate Parquet files (using zstd compression).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("--input",
                         help="Input WARC file(s) or director(y/ies) containing WARC files.",
                         required=True,
                         nargs='+')
-    parser.add_argument("--intermediate-db",
-                        help="Path for the intermediate DuckDB database file.",
-                        default="./data/intermediate/intermediate_articles.duckdb")
+    parser.add_argument("--output-dir",
+                        help="Directory for intermediate Parquet output files.",
+                        default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--max-files",
                         help="Maximum number of WARC files to process overall.",
                         type=int,
@@ -56,9 +49,6 @@ def parse_arguments():
     parser.add_argument("--pattern",
                         help="Glob pattern for matching WARC files within input directories.",
                         default="*.warc.gz")
-    parser.add_argument("--truncate",
-                        help="Truncate (delete and recreate) the intermediate database before starting.",
-                        action="store_true")
     parser.add_argument("--processes",
                         help="Number of parallel processes (default: auto-detect).",
                         type=int)
@@ -71,10 +61,11 @@ def parse_arguments():
     return parser.parse_args()
 
 # --- Logging Setup ---
-def setup_logging(log_dir: str | Path):
+def setup_logging(log_dir: Path | str, timestamp_str: str) -> Path:
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file_name = f"stage1_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    # Use the provided timestamp string
+    log_file_name = f"stage1_scan_{timestamp_str}.log"
     log_file_path = log_dir / log_file_name
 
     logging.basicConfig(
@@ -90,123 +81,102 @@ def setup_logging(log_dir: str | Path):
 
 # --- Domain Loading & Utility Functions ---
 # TODO: Load this from a config file (YAML/JSON) via args.config
-# For now, using a simplified version of the list from the original script
 TAIWANESE_DOMAINS_CONFIG = [
-    {"name": "Economic Daily (經濟日報)", "domains": ["money.udn.com"]},
-    {"name": "PTS News (公視新聞)", "domains": ["news.pts.org.tw", "pts.org.tw"]},
-    {"name": "TVBS News (TVBS新聞台)", "domains": ["news.tvbs.com.tw", "tvbs.com.tw"]},
-    {"name": "ETtoday (ETtoday新聞雲)", "domains": ["www.ettoday.net", "ettoday.net", "fashion.ettoday.net"]},
-    {"name": "United Daily (聯合報)", "domains": ["udn.com"]},
-    {"name": "EBC News (東森新聞)", "domains": ["news.ebc.net.tw", "ebc.net.tw"]},
-    {"name": "TTV News (台視新聞)", "domains": ["www.ttv.com.tw", "ttv.com.tw"]},
-    {"name": "CTV News (中視新聞)", "domains": ["new.ctv.com.tw", "ctv.com.tw"]},
-    {"name": "CTS News (華視新聞)", "domains": ["news.cts.com.tw", "cts.com.tw"]},
-    {"name": "Liberty Times (自由時報)", "domains": ["www.ltn.com.tw", "ltn.com.tw", "news.ltn.com.tw"]},
-    {"name": "Storm Media (風傳媒)", "domains": ["www.storm.mg", "storm.mg"]},
-    {"name": "Formosa TV News (民視新聞)", "domains": ["www.ftvnews.com.tw", "ftvnews.com.tw"]},
-    {"name": "SET News (三立新聞)", "domains": ["www.setn.com", "setn.com"]},
-    {"name": "China Times (中國時報)", "domains": ["www.chinatimes.com", "chinatimes.com"]},
-    {"name": "Apple Daily (蘋果日報)", "domains": ["tw.appledaily.com", "appledaily.com.tw"]},
-    {"name": "Central News Agency (中央社)", "domains": ["www.cna.com.tw", "cna.com.tw"]},
-    {"name": "Yahoo News Taiwan", "domains": ["tw.news.yahoo.com"]},
-    {"name": "Now News (今日新聞)", "domains": ["www.nownews.com", "nownews.com"]}
+    {"name": "Economic Daily (經濟日報)", "domains": ["money.udn.com"], "is_english": False},
+    {"name": "PTS News (公視新聞)", "domains": ["news.pts.org.tw", "pts.org.tw"], "is_english": False},
+    {"name": "TVBS News (TVBS新聞台)", "domains": ["news.tvbs.com.tw", "tvbs.com.tw"], "is_english": False},
+    {"name": "ETtoday (ETtoday新聞雲)", "domains": ["ettoday.net", "fashion.ettoday.net"], "is_english": False}, # Excluded www.ettoday.net; fashion.ettoday.net?
+    {"name": "United Daily (聯合報)", "domains": ["udn.com"], "is_english": False},
+    {"name": "EBC News (東森新聞)", "domains": ["news.ebc.net.tw", "ebc.net.tw"], "is_english": False},
+    {"name": "TTV News (台視新聞)", "domains": ["ttv.com.tw"], "is_english": False},
+    {"name": "CTV News (中視新聞)", "domains": ["new.ctv.com.tw", "ctv.com.tw"], "is_english": False},
+    {"name": "CTS News (華視新聞)", "domains": ["news.cts.com.tw", "cts.com.tw"], "is_english": False},
+    {"name": "Liberty Times (自由時報)", "domains": ["ltn.com.tw", "news.ltn.com.tw"], "is_english": False},
+    {"name": "Storm Media (風傳媒)", "domains": ["storm.mg"], "is_english": False},
+    {"name": "Formosa TV News (民視新聞)", "domains": ["ftvnews.com.tw"], "is_english": False},
+    {"name": "SET News (三立新聞)", "domains": ["setn.com"], "is_english": False},
+    {"name": "China Times (中國時報)", "domains": ["chinatimes.com"], "is_english": False},
+    # {"name": "Apple Daily (蘋果日報)", "domains": ["tw.appledaily.com", "appledaily.com.tw"], "is_english": False}, # Defunct
+    {"name": "Central News Agency (中央社)", "domains": ["cna.com.tw"], "is_english": False},
+    # {"name": "Yahoo News Taiwan", "domains": ["tw.news.yahoo.com"], "is_english": False}, # Aggregator, handle separately?
+    {"name": "Now News (今日新聞)", "domains": ["nownews.com"], "is_english": False},
+    # Added English sources
+    {"name": "Taipei Times", "domains": ["taipeitimes.com"], "is_english": True},
+    {"name": "Taiwan News", "domains": ["taiwannews.com.tw"], "is_english": True},
+    # Added based on whitelist check
+    {"name": "The News Lens (關鍵評論網)", "domains": ["thenewslens.com"], "is_english": False} # Assuming Chinese source primarily
 ]
 
-def load_domain_config(config_data: list[dict]) -> tuple[dict[str, str], set[str]]:
+def load_domain_config(config_data: list[dict]) -> tuple[dict[str, str], set[str], dict[str, bool]]:
     """Process the domain configuration list into lookup structures."""
     domain_to_outlet: dict[str, str] = {}
     all_target_domains: set[str] = set()
+    domain_to_language: dict[str, bool] = {}
     for outlet in config_data:
         outlet_name = outlet["name"]
+        is_english = outlet.get("is_english", False) # Default to False if missing
         for domain in outlet["domains"]:
             domain_to_outlet[domain] = outlet_name
             all_target_domains.add(domain)
+            domain_to_language[domain] = is_english
     logging.info(f"Loaded {len(all_target_domains)} target domains for {len(config_data)} outlets.")
-    return domain_to_outlet, all_target_domains
+    return domain_to_outlet, all_target_domains, domain_to_language
 
 # (This function could be moved to a shared warc_utils.py later)
-def extract_domain(url: str | None) -> tuple[str | None, str | None]:
-    """Extract domain from URL, returning both raw and www/no-www variants."""
+def extract_domain(url: str | None) -> str | None:
+    """Extract the base domain from a URL, stripping www. and port."""
     if not url:
-        return None, None
+        return None
     try:
         parsed_url = urlparse(url)
         # Handle URLs without // (e.g., "dns:example.com") gracefully
         if '//' not in url and not parsed_url.scheme and parsed_url.path:
-            domain = parsed_url.path.split('/')[0].lower()
+            domain_part = parsed_url.path.split('/')[0].lower()
         else:
-            domain = parsed_url.netloc.lower()
+            domain_part = parsed_url.netloc.lower()
+
+        # Strip port number if present
+        domain = domain_part.split(':')[0]
 
         if not domain:
             # Attempt to extract from path if netloc is empty (e.g., file:///path/domain.com)
             if parsed_url.path and '.' in parsed_url.path.split('/')[-1]:
-                 domain = parsed_url.path.split('/')[-1].lower()
+                 domain = parsed_url.path.split('/')[-1].lower().split(':')[0]
             else:
-                 return None, None
+                 return None
 
-        # Simple check if it looks like a domain name (contains a dot)
-        # More robust validation could be added if needed
-        if '.' not in domain:
-             logging.debug(f"Extracted domain '{domain}' from URL '{url}' lacks a dot, ignoring.")
-             return None, None
-
+        # Always strip www.
         if domain.startswith('www.'):
-            domain_no_www = domain[4:]
-            return domain, domain_no_www
-        else:
-            www_domain = f"www.{domain}"
-            return domain, www_domain
+            domain = domain[4:]
+
+        # Allow 'localhost' explicitly
+        if domain == 'localhost':
+            return domain
+        # Simple check if it looks like a domain name (contains a dot)
+        elif '.' not in domain:
+             logging.debug(f"Extracted part '{domain}' from URL '{url}' lacks a dot (and is not localhost), ignoring.")
+             return None
+        
+        return domain
+
     except Exception as e:
         logging.warning(f"Could not parse domain from URL '{url}': {e}")
-        return None, None
-
-# --- Database Setup ---
-def setup_intermediate_database(db_path_str: str | Path, truncate: bool = False) -> duckdb.DuckDBPyConnection:
-    """Setup the intermediate DuckDB database for storing raw HTML bytes."""
-    db_path = Path(db_path_str)
-    db_dir = db_path.parent
-    db_dir.mkdir(parents=True, exist_ok=True)
-
-    operation = "Connecting to" if db_path.exists() else "Creating"
-    logging.info(f"{operation} intermediate database: {db_path}")
-
-    if truncate and db_path.exists():
-        try:
-            db_path.unlink()
-            logging.info(f"Truncated existing intermediate database: {db_path}")
-        except OSError as e:
-            logging.error(f"Failed to remove intermediate database file {db_path}: {e}")
-            # Decide if this is fatal or if we should try to continue
-            raise # Re-raise for now, assuming it's fatal
-
-    try:
-        # Connect to DuckDB
-        conn = duckdb.connect(str(db_path))
-
-        # Create raw_html table if it doesn't exist
-        # Use INTERMEDIATE_SCHEMA constant defined earlier
-        conn.execute(f"CREATE TABLE IF NOT EXISTS {INTERMEDIATE_DB_TABLE} ({INTERMEDIATE_SCHEMA});")
-
-        # Optional: Add indexes if needed for potential lookups, though Stage 2 reads full table
-        # conn.execute(f"CREATE INDEX IF NOT EXISTS idx_intermediate_domain ON {INTERMEDIATE_DB_TABLE}(domain);"))
-
-        logging.info(f"Intermediate database table '{INTERMEDIATE_DB_TABLE}' setup complete.")
-        return conn
-    except duckdb.Error as e:
-        logging.critical(f"Failed to connect to or setup intermediate database {db_path}: {e}")
-        raise # Propagate the error
+        return None
 
 # --- WARC Processing Function ---
 def process_warc_file_stage1(args_tuple: tuple) -> dict:
-    """Processes a single WARC file for Stage 1.
+    """Processes a single WARC file for Stage 1, writing output to Parquet using zstd.
 
     Args:
-        args_tuple: A tuple containing (warc_file_path, limit_records, domain_to_outlet, all_target_domains).
+        args_tuple: A tuple containing (warc_file_path, limit_records, domain_to_outlet,
+                    all_target_domains, domain_to_language, output_subdir).
+                    Note: output_subdir is the pre-calculated year/month path.
 
     Returns:
-        A dictionary summarizing the results for this file.
+        A dictionary summarizing the results for this file (counts, errors).
     """
-    warc_file_path, limit_records, domain_to_outlet, all_target_domains = args_tuple
+    # Unpack arguments, including pre-calculated output_subdir
+    warc_file_path, limit_records, domain_to_outlet, all_target_domains, domain_to_language, output_subdir_path = args_tuple
     file_basename = warc_file_path.name
     results = {
         "warc_file": str(warc_file_path),
@@ -216,20 +186,17 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
         "target_html_extracted": 0, # Target domain records that were HTML and bytes extracted
         "html_bytes_extracted": 0, # Sum of bytes for extracted HTML
         "domain_counts": Counter(),
-        "articles_to_insert": [],
+        "parquet_file_path": None, # Store the path of the generated parquet file
         "error": None,
         "processing_time": 0
     }
     start_time = time.time()
 
+    extracted_articles_data = []
+
     try:
-        # Use FileStream and GZipStream with context manager
-        with FileStream(str(warc_file_path), 'rb') as fs, GZipStream(fs) as stream: # Add LZ4Stream logic if needed based on filename
-
-            # Iterate through response records without initial HTTP parsing
-            # Note: Only WarcRecordType.response should contain HTTP data we need
+        with FileStream(str(warc_file_path), 'rb') as fs, GZipStream(fs) as stream:
             archive_iterator = ArchiveIterator(stream, record_types=WarcRecordType.response, parse_http=False)
-
             for record_count, record in enumerate(archive_iterator):
                 results["records_processed"] += 1
 
@@ -255,12 +222,9 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
                         logging.warning(f"Could not parse WARC-Date '{date_str}' in {file_basename}, record {warc_id}. Storing as None.")
 
                 # --- Domain Extraction and Counting ---
-                domain, alt_domain = extract_domain(url)
+                domain = extract_domain(url)
                 if domain:
                     results["domain_counts"][domain] += 1
-                    # Optionally count alt_domain as well if different?
-                    # if alt_domain and alt_domain != domain:
-                    #     results["domain_counts"][alt_domain] += 1
                 else:
                     logging.debug(f"Could not extract domain from URL: {url} in {file_basename}")
                     continue # Skip if no domain found
@@ -271,13 +235,12 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
                 if domain in all_target_domains:
                     outlet_name = domain_to_outlet.get(domain)
                     is_target = True
-                elif alt_domain and alt_domain in all_target_domains:
-                    outlet_name = domain_to_outlet.get(alt_domain)
-                    is_target = True
-                    domain = alt_domain # Use the matched domain for consistency
 
                 if is_target:
                     results["target_domain_hits"] += 1
+                    # Get the language flag for the matched domain
+                    is_english_flag = domain_to_language.get(domain, False) # Default should align with load_domain_config
+
                     # --- Process Target Record (Parse HTTP, Check Type, Extract Bytes) ---
                     try:
                         record.parse_http(auto_decode='content') # Handle headers & decompression
@@ -295,16 +258,17 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
                             results["target_html_extracted"] += 1
                             results["html_bytes_extracted"] += len(html_bytes)
 
-                            # Prepare data for batch insertion
-                            article_data = (
-                                warc_id,
-                                warc_dt, # Store datetime object or None
-                                url,
-                                domain, # Store the primary matched domain
-                                outlet_name,
-                                html_bytes # Store raw bytes
-                            )
-                            results["articles_to_insert"].append(article_data)
+                            # Ensure we are inside the block where html_content_bytes is valid
+                            if html_bytes: # Check if html_content_bytes exists and is not None/empty
+                                extracted_articles_data.append({
+                                    "warc_id": warc_id,
+                                    "warc_date": warc_dt,
+                                    "url": url,
+                                    "domain": domain,
+                                    "outlet": outlet_name,
+                                    "is_english": is_english_flag,
+                                    "html_content_bytes": html_bytes,
+                                })
 
                         # else: Record was target domain but not HTML content
 
@@ -335,41 +299,102 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
         results["error"] = f"Unhandled exception: {e}"
     finally:
         results["processing_time"] = time.time() - start_time
+
+        # --- Write Extracted Data to Parquet (if any) ---
+        if extracted_articles_data and not results["error"]:
+            try:
+                # Create Polars DataFrame
+                # Specify schema to handle potential empty lists and ensure correct types
+                # Convert datetime objects to timezone-naive UTC if they are timezone-aware
+                # DuckDB stores TIMESTAMP WITH TIME ZONE, Parquet often expects naive UTC or specific formats
+                # Polars handles aware datetime objects well, but conversion might be needed depending on Stage 2
+                output_df = pl.DataFrame(extracted_articles_data) # Schema inferred here
+
+                # MODIFIED: Parquet filename generation
+                # Remove .warc.gz, .warc.lz4, then add .parquet
+                base_for_parquet = file_basename
+                if base_for_parquet.endswith(".warc.gz"):
+                    base_for_parquet = base_for_parquet[:-len(".warc.gz")]
+                elif base_for_parquet.endswith(".warc.lz4"):
+                    base_for_parquet = base_for_parquet[:-len(".warc.lz4")]
+                # Add other extensions if necessary
+                
+                output_filename = f"{base_for_parquet}.parquet"
+                
+                output_path = output_subdir_path / output_filename
+                results["parquet_file_path"] = str(output_path)
+
+                logging.debug(f"Writing {len(output_df)} extracted records from {file_basename} to {output_path} using zstd compression")
+                # Write to Parquet using the specified compression
+                # Ensure the output directory (including year/month) exists
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_df.write_parquet(output_path, compression='zstd')
+                logging.debug(f"Successfully wrote Parquet file: {output_path}")
+
+            except ImportError:
+                # PyArrow is needed for zstd
+                logging.error(f"Polars or PyArrow (for zstd) not installed. Cannot write Parquet. pip install polars[pyarrow]")
+                results["error"] = f"Missing polars[pyarrow] for zstd Parquet output"
+            except Exception as e:
+                logging.error(f"Failed to write Parquet file {output_filename} for {file_basename}: {e}", exc_info=True)
+                results["error"] = f"Parquet writing error: {e}"
+                # Clear the parquet file path if writing failed
+                results["parquet_file_path"] = None
+
         log_level = logging.INFO if results["error"] else logging.DEBUG
         status_message = f"error: {results['error']}" if results["error"] else "successfully"
-        
-        logging.log(log_level, 
+
+        logging.log(log_level,
                     f"Finished processing {file_basename} {status_message} "
                     f"({results['records_processed']} records processed, "
                     f"{results['target_html_extracted']} target HTML extracted in {results['processing_time']:.2f}s)"
                    )
 
+    # Return only summary stats
+    # Remove sensitive/large data like the list of articles before returning
+    # results.pop("articles_to_insert", None) # Already replaced with Parquet writing
     return results
 
 # --- Report Generation ---
-def generate_stage1_report(results: dict, args: argparse.Namespace, log_file_path: Path):
-    """Generates a Markdown report summarizing the Stage 1 scan results."""
-    report_file_name = f"stage1_scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    # Place report in the same directory as the log file
-    report_file_path = log_file_path.parent / report_file_name
-    logging.info(f"Generating Stage 1 analysis report: {report_file_path}")
+def generate_stage1_report(results: dict, args: argparse.Namespace, log_file_path: Path, timestamp_str: str):
+    """Generates a Markdown report and saves domain counts to JSON."""
+    report_dir = log_file_path.parent # Use log directory for reports
+    # Use the provided timestamp string for report name
+    report_file_name_md = f"stage1_scan_report_{timestamp_str}.md"
+    report_file_path_md = report_dir / report_file_name_md
+    # Use the same timestamp for the JSON domain counts file
+    domain_counts_file_name_json = f"stage1_domain_counts_{timestamp_str}.json"
+    domain_counts_file_path_json = report_dir / domain_counts_file_name_json
 
-    # Sort domain counts for reporting
-    sorted_domain_counts = results.get("overall_domain_counts", Counter()).most_common()
+    logging.info(f"Generating Stage 1 analysis report (Markdown): {report_file_path_md}")
+    logging.info(f"Saving full domain counts (JSON): {domain_counts_file_path_json}")
 
+    overall_domain_counts = results.get("overall_domain_counts", Counter())
+    sorted_domain_counts = overall_domain_counts.most_common()
+
+    # --- Save Domain Counts to JSON --- 
     try:
-        with report_file_path.open('w', encoding='utf-8') as f:
+        import json
+        with domain_counts_file_path_json.open('w', encoding='utf-8') as f_json:
+            # Convert Counter to a standard dict for JSON serialization
+            json.dump(dict(overall_domain_counts), f_json, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logging.error(f"Failed to save domain counts to JSON: {e}", exc_info=True)
+
+    # --- Generate Markdown Report --- 
+    try:
+        with report_file_path_md.open('w', encoding='utf-8') as f:
             f.write("# Stage 1: WARC Scan & Raw HTML Extraction Report\n\n")
             f.write(f"**Analysis Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"**Log File:** `{log_file_path.name}`\n")
+            f.write(f"**Domain Counts File:** `{domain_counts_file_path_json.name}`\n")
             f.write(f"**Input Paths Processed:** `{', '.join(args.input)}`\n")
             f.write(f"**File Pattern:** `{args.pattern}`\n")
             if args.limit_records:
                 f.write(f"**Record Limit Per File:** {args.limit_records:,}\n")
             if args.max_files:
                  f.write(f"**Overall File Limit:** {args.max_files:,}\n")
-            f.write(f"**Intermediate DB:** `{args.intermediate_db}`\n")
-            f.write(f"**Intermediate DB Truncated:** {'Yes' if args.truncate else 'No'}\n")
+            f.write(f"**Output Directory:** `{args.output_dir}`\n")
             f.write("\n---\n\n")
 
             f.write("## Summary\n\n")
@@ -380,8 +405,7 @@ def generate_stage1_report(results: dict, args: argparse.Namespace, log_file_pat
             f.write(f"- **Total Records Scanned:** {results.get('total_records_processed', 0):,}\n")
             f.write(f"- **Total HTML Records Found (any domain):** {results.get('total_html_records_found', 0):,}\n")
             f.write(f"- **Target Domain Hits (any content type):** {results.get('total_target_domain_hits', 0):,}\n")
-            f.write(f"- **Target HTML Records Extracted (Bytes):** {results.get('total_target_html_extracted', 0):,}\n")
-            f.write(f"- **Articles Inserted into Intermediate DB:** {results.get('total_articles_inserted', 0):,}\n")
+            f.write(f"- **Target HTML Records Extracted (to Parquet):** {results.get('total_target_html_extracted', 0):,}\n")
             total_bytes_mb = results.get('total_html_bytes_extracted', 0) / (1024 * 1024)
             f.write(f"- **Total HTML Bytes Extracted (Target):** {results.get('total_html_bytes_extracted', 0):,} bytes ({total_bytes_mb:.2f} MB)\n")
             if results.get("errors"):
@@ -430,28 +454,24 @@ def generate_stage1_report(results: dict, args: argparse.Namespace, log_file_pat
                      f.write("| ... | *(additional errors logged)* |\n")
 
     except Exception as e:
-         logging.error(f"Failed to write Stage 1 analysis report: {e}", exc_info=True)
+         logging.error(f"Failed to write Stage 1 analysis report (Markdown): {e}", exc_info=True)
 
 # --- Main Parallel Execution Logic ---
-def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str | Path, limit_records_per_file: int | None, truncate_db: bool, num_processes: int | None, domain_config: list[dict], args_for_report: argparse.Namespace, log_file_path_for_report: Path):
-    """Scan WARC files in parallel and store results in the intermediate DB."""
+def scan_warc_files_parallel(warc_files: list[Path], output_dir: Path | str, limit_records_per_file: int | None, num_processes: int | None, domain_config: list[dict], args_for_report: argparse.Namespace, log_file_path_for_report: Path, timestamp_str_for_report: str):
+    """Scan WARC files in parallel and store results in Parquet files in the output directory.
+       Output files are placed in year/month subdirectories derived from the WARC file path.
+    """
     if not warc_files:
         logging.warning("No WARC files found or provided for Stage 1 scanning.")
         return
 
-    logging.info(f"Starting Stage 1 scan of {len(warc_files)} WARC files.")
+    logging.info(f"Starting Stage 1 scan of {len(warc_files)} WARC files. Outputting to: {output_dir}")
+    output_dir_path = Path(output_dir)
+    # Ensure output directory exists (worker process also checks, but good to have here too)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
 
     # Load domain lookups
-    domain_to_outlet, all_target_domains = load_domain_config(domain_config)
-
-    # Setup intermediate database connection (main process handles schema)
-    # Close connection, main process will handle inserts from results queue.
-    try:
-        db_conn_setup = setup_intermediate_database(intermediate_db_path, truncate=truncate_db)
-        db_conn_setup.close()
-    except Exception as e:
-         logging.critical(f"Failed to setup intermediate database. Exiting Stage 1. Error: {e}")
-         return # Stop if DB setup fails
+    domain_to_outlet, all_target_domains, domain_to_language = load_domain_config(domain_config)
 
     # Aggregate results and stats
     all_results = {
@@ -460,9 +480,9 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
         "total_html_records_found": 0,
         "total_target_domain_hits": 0,
         "total_target_html_extracted": 0,
-        "total_articles_inserted": 0,
         "total_html_bytes_extracted": 0,
         "overall_domain_counts": Counter(),
+        "parquet_files_created": [], # List paths of created files
         "errors": [],
         "total_cpu_processing_time": 0,
         # Add more summary stats as needed
@@ -477,7 +497,8 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
             # Use sched_getaffinity on Linux/Unix for more accurate available CPU count
             available_cpus = len(os.sched_getaffinity(0))
         except AttributeError:
-            available_cpus = os.cpu_count() or 1 # Fallback for other OS
+            # Fallback for other OS or if sched_getaffinity fails
+            available_cpus = multiprocessing.cpu_count() or 1
         effective_num_processes = min(available_cpus, len(warc_files))
         # Consider adding a max cap if available_cpus is very high to avoid overwhelming IO
         # effective_num_processes = min(effective_num_processes, 32) # Example cap
@@ -486,25 +507,54 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
 
     logging.info(f"Using {effective_num_processes} processes for parallel scanning.")
 
-    # Prepare arguments for parallel processing
-    # Pass necessary domain lookups to each process
-    process_args = [
-        (warc_file, limit_records_per_file, domain_to_outlet, all_target_domains)
-        for warc_file in warc_files
-    ]
+    # Pre-calculate output subdirectories and prepare arguments
+    process_args = []
+    path_pattern_ym = re.compile(r'.*/(\d{4})/(\d{2})/.*') # Pattern like /YYYY/MM/
+    path_pattern_cc = re.compile(r'.*CC-MAIN-(\d{4})-(\d{2}).*') # Pattern like CC-MAIN-YYYY-MM
+    path_pattern_cy = re.compile(r'.*-(\d{8})-.*') # Pattern like common_crawl/crawl-data/CC-MAIN-2023-06/segments/1674746793803.93/warc/CC-MAIN-20230126152633-20230126182633-00000.warc.gz extract 20230126
+    
+    for warc_file in warc_files:
+        year, month = "unknown_date", "unknown_month"
+        warc_path_str = str(warc_file)
+        
+        # Try different patterns to extract year/month
+        match_ym = path_pattern_ym.match(warc_path_str)
+        match_cc = path_pattern_cc.match(warc_path_str)
+        match_cy = path_pattern_cy.match(warc_path_str)
+        
+        if match_ym:
+            year, month = match_ym.groups()
+            logging.debug(f"Extracted date {year}/{month} from path (YYYY/MM pattern): {warc_path_str}")
+        elif match_cc:
+            year, month = match_cc.groups()
+            logging.debug(f"Extracted date {year}-{month} from path (CC-MAIN pattern): {warc_path_str}")
+        elif match_cy:
+            date_str = match_cy.group(1) # YYYYMMDD
+            try:
+                 year = date_str[:4]
+                 month = date_str[4:6]
+                 logging.debug(f"Extracted date {year}/{month} from path (YYYYMMDD pattern): {warc_path_str}")
+            except IndexError:
+                  logging.warning(f"Could not parse year/month from extracted date string '{date_str}' in path: {warc_path_str}")
+        else:
+            logging.warning(f"Could not extract year/month from WARC file path using known patterns: {warc_path_str}. Using fallback directory.")
+            
+        # Construct the specific output subdirectory for this file
+        output_subdir_for_file = output_dir_path / year / month
+        
+        process_args.append(
+            (warc_file, 
+             limit_records_per_file, 
+             domain_to_outlet, 
+             all_target_domains, 
+             domain_to_language, 
+             output_subdir_for_file # Pass the specific subdir path
+            )
+        )
 
-    articles_to_insert_batch = []
     processed_files_count = 0
-    db_conn_main = None # Initialize
 
     try:
-        # Re-open DB connection in the main process for batch inserts
-        # This avoids complex connection sharing/pickling issues with multiprocessing
-        db_conn_main = duckdb.connect(str(intermediate_db_path))
-        # Set PRAGMAs for potentially faster inserts if needed (use with caution)
-        # db_conn_main.execute("PRAGMA threads=4;") # Example: Use multiple threads for DuckDB ops
-        # db_conn_main.execute("PRAGMA memory_limit='1GB';") # Example: Set memory limit
-
         with multiprocessing.Pool(processes=effective_num_processes) as pool:
             progress_bar = tqdm(pool.imap_unordered(process_warc_file_stage1, process_args),
                                 total=len(warc_files), desc="Stage 1 Scanning WARC files")
@@ -517,7 +567,7 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
                 if result.get("error"):
                     logging.error(f"Error processing {file_path}: {result['error']}")
                     all_results["errors"].append({"file": file_path, "error": result["error"]})
-                    # Still accumulate basic stats even if there was an error mid-file
+                    # Still accumulate basic stats even if there was an error
                     all_results["total_records_processed"] += result.get("records_processed", 0)
                     all_results["total_cpu_processing_time"] += result.get("processing_time", 0)
                     all_results["overall_domain_counts"].update(result.get("domain_counts", Counter()))
@@ -535,42 +585,8 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
                 all_results["total_html_bytes_extracted"] += result["html_bytes_extracted"]
                 all_results["overall_domain_counts"].update(result["domain_counts"])
                 all_results["total_cpu_processing_time"] += result["processing_time"]
-
-                # Add articles from this file's results to the main batch
-                articles_to_insert_batch.extend(result.get("articles_to_insert", []))
-
-                # Batch Insert into Intermediate Database (from main process)
-                if len(articles_to_insert_batch) >= INSERT_BATCH_SIZE or processed_files_count % FILES_PER_COMMIT == 0:
-                    if articles_to_insert_batch:
-                        logging.info(f"Inserting batch of {len(articles_to_insert_batch)} raw articles into intermediate DB...")
-                        try:
-                            # Use INSERT OR IGNORE for basic PK conflict handling during the run
-                            # Or ON CONFLICT DO NOTHING if INSERT OR IGNORE not supported/desired
-                            # Note: DuckDB often prefers ON CONFLICT
-                            start_insert_time = time.time()
-                            db_conn_main.executemany(f"INSERT INTO {INTERMEDIATE_DB_TABLE} (warc_id, warc_date, url, domain, outlet, html_content_bytes) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(warc_id) DO NOTHING",
-                                                       articles_to_insert_batch)
-                            inserted_count = db_conn_main.last_changes()
-                            db_conn_main.commit() # Commit after successful executemany
-                            insert_duration = time.time() - start_insert_time
-                            all_results["total_articles_inserted"] += inserted_count
-                            logging.info(f"Successfully inserted batch ({inserted_count} new). Total inserted: {all_results['total_articles_inserted']:,}. Time: {insert_duration:.2f}s")
-                            articles_to_insert_batch = [] # Clear batch
-                        except duckdb.Error as e:
-                            logging.error(f"Intermediate DB batch insert error: {e}", exc_info=True)
-                            try:
-                                db_conn_main.rollback()
-                            except Exception as rb_e:
-                                logging.error(f"Rollback failed after insert error: {rb_e}")
-                            # Decide whether to stop or continue. For robustness, log and clear batch.
-                            articles_to_insert_batch = [] # Clear batch to avoid re-attempting bad data
-                        except Exception as e:
-                             logging.error(f"Unexpected error during batch insert: {e}", exc_info=True)
-                             try:
-                                 db_conn_main.rollback()
-                             except Exception as rb_e:
-                                 logging.error(f"Rollback failed after unexpected insert error: {rb_e}")
-                             articles_to_insert_batch = [] # Clear batch
+                if result.get("parquet_file_path"):
+                    all_results["parquet_files_created"].append(result["parquet_file_path"])
 
     except KeyboardInterrupt:
         logging.warning("Stage 1 scan interrupted by user. Processing partial results...")
@@ -584,55 +600,64 @@ def scan_warc_files_parallel(warc_files: list[Path], intermediate_db_path: str |
              pool.terminate()
              pool.join()
     finally:
-        # Final Insert for any remaining items in the batch
-        if articles_to_insert_batch:
-            logging.info(f"Inserting final batch of {len(articles_to_insert_batch)} raw articles...")
-            try:
-                start_insert_time = time.time()
-                db_conn_main.executemany(f"INSERT INTO {INTERMEDIATE_DB_TABLE} (warc_id, warc_date, url, domain, outlet, html_content_bytes) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(warc_id) DO NOTHING",
-                                           articles_to_insert_batch)
-                inserted_count = db_conn_main.last_changes()
-                db_conn_main.commit()
-                insert_duration = time.time() - start_insert_time
-                all_results["total_articles_inserted"] += inserted_count
-                logging.info(f"Successfully inserted final batch ({inserted_count} new). Total inserted: {all_results['total_articles_inserted']:,}. Time: {insert_duration:.2f}s")
-            except duckdb.Error as e:
-                logging.error(f"Intermediate DB final batch insert error: {e}", exc_info=True)
-                try:
-                    db_conn_main.rollback()
-                except Exception as rb_e:
-                    logging.error(f"Rollback failed after final insert error: {rb_e}")
-            except Exception as e:
-                 logging.error(f"Unexpected error during final batch insert: {e}", exc_info=True)
-                 try:
-                     db_conn_main.rollback()
-                 except Exception as rb_e:
-                     logging.error(f"Rollback failed after unexpected final insert error: {rb_e}")
+        # Calculate overall stats
+        total_elapsed_wall = time.time() - start_time_wall
+        all_results["total_wall_time"] = total_elapsed_wall
+        all_results["files_processed"] = processed_files_count
 
-        # Close the main process DB connection
-        if db_conn_main:
-            try:
-                db_conn_main.close()
-                logging.info("Main process intermediate database connection closed.")
-            except Exception as e:
-                 logging.error(f"Error closing main DB connection: {e}")
-
-    # Calculate overall stats
-    total_elapsed_wall = time.time() - start_time_wall
-    all_results["total_wall_time"] = total_elapsed_wall
-    all_results["files_processed"] = processed_files_count
-
-    logging.info("Finished Stage 1 scan.")
-    # Generate the report using the collected results
-    generate_stage1_report(all_results, args_for_report, log_file_path_for_report)
+        logging.info("Finished Stage 1 scan.")
+        # Generate the report using the collected results and the timestamp
+        generate_stage1_report(all_results, args_for_report, log_file_path_for_report, timestamp_str_for_report)
 
     return all_results
 
 # --- Main Function ---
 def main():
     args = parse_arguments()
-    log_file_path = setup_logging(args.log_dir)
+    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file_path = setup_logging(Path(args.log_dir), run_timestamp) # Ensure Path object
     logging.info(f"Stage 1 Arguments: {vars(args)}")
+
+    # Ensure output directory exists before starting parallel processes
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Ensured output directory exists: {output_dir}")
+
+    # --- Whitelist Domains for Check ---
+    # From user input - domains to check if they were found but are not currently targeted
+    whitelist_domains = {
+        "ltn.com.tw",           # 自由時報
+        "taipeitimes.com",      # Taipei Times
+        "udn.com",              # 聯合報
+        "money.udn.com",        # 經濟日報
+        "chinatimes.com",       # 中國時報
+        "ctee.com.tw",          # 工商時報
+        "sunmedia.tw",          # 商傳媒
+        "cna.com.tw",           # 中央通訊社
+        "peopo.org",            # PeoPo公民新聞
+        "ettoday.net",          # ETtoday新聞雲
+        "nownews.com",          # NOWnews今日新聞
+        "tw.appledaily.com",    # 蘋果新聞網 (台灣版)
+        "enn.tw",               # 台灣電報
+        "17news.net",           # 民生好報
+        "linews.tw",            # 新民生報
+        "seenews.tw",           # 台新傳媒（台灣新新聞報）
+        "storm.mg",             # 風傳媒
+        "newtalk.tw",           # 新頭殼（Newtalk新聞）
+        "thenewslens.com",      # 關鍵評論網（The News Lens）
+        "twreporter.org",       # 報導者（The Reporter）
+        "my-formosa.com.tw",    # 美麗島電子報
+        "peoplenews.tw",        # 民報（Taiwan People News）
+        "upmedia.mg",           # 上報（Up Media）
+        "newsmarket.com.tw",    # 上下游新聞市集（News Market）
+        "taiwannews.com.tw",    # Added based on previous steps
+        # Add any other domains you want to specifically check here
+    }
+    logging.info(f"Will check if {len(whitelist_domains)} specific domains were found but not targeted.")
+
+    # Load the target domain config to get the set of *currently targeted* domains
+    _, current_target_domains, _ = load_domain_config(TAIWANESE_DOMAINS_CONFIG)
+    logging.info(f"Loaded {len(current_target_domains)} domains currently targeted for extraction.")
 
     # --- Input File Discovery ---
     warc_files_to_process = []
@@ -676,40 +701,57 @@ def main():
         unique_warc_files = unique_warc_files[:args.max_files]
 
     # --- Execute Stage 1 Scan ---
+    scan_results = None # Initialize
     try:
         scan_results = scan_warc_files_parallel(
             warc_files=unique_warc_files,
-            intermediate_db_path=args.intermediate_db,
+            output_dir=output_dir, # Pass Path object
             limit_records_per_file=args.limit_records,
-            truncate_db=args.truncate,
             num_processes=args.processes,
-            domain_config=TAIWANESE_DOMAINS_CONFIG,
-            args_for_report=args,             # Pass args for reporting
-            log_file_path_for_report=log_file_path # Pass log path for report location
+            domain_config=TAIWANESE_DOMAINS_CONFIG, # This is used *during* the scan
+            args_for_report=args, # Pass the full args namespace
+            log_file_path_for_report=log_file_path,
+            timestamp_str_for_report=run_timestamp
         )
 
-        # --- Final Summary Logging & Reporting ---
-        # Check if scan_results is None (could happen if DB setup failed)
+        # --- Final Summary Logging ---
         if scan_results is None:
              logging.error("Stage 1 scan did not complete successfully.")
              return
+        # Log summary based on collected results
+        logging.info("--- Stage 1 Scan Summary ---")
+        logging.info(f"Files Processed: {scan_results.get('files_processed', 0):,}")
+        logging.info(f"Total Records Scanned: {scan_results.get('total_records_processed', 0):,}")
+        logging.info(f"Target HTML Extracted (to Parquet): {scan_results.get('total_target_html_extracted', 0):,}")
+        parquet_files_count = len(scan_results.get('parquet_files_created', []))
+        logging.info(f"Parquet Files Created: {parquet_files_count:,} in {output_dir}")
+        total_bytes_mb = scan_results.get('total_html_bytes_extracted', 0) / (1024 * 1024)
+        logging.info(f"Total HTML Bytes Extracted: {total_bytes_mb:.2f} MB")
+        logging.info(f"Total Wall Clock Time: {scan_results.get('total_wall_time', 0):.2f}s")
+        errors_count = len(scan_results.get('errors', []))
+        if errors_count > 0:
+            logging.warning(f"Errors encountered in {errors_count:,} file(s). See log for details.")
 
-        logging.info("--- Stage 1 Summary ---")
-        logging.info(f"  Files Processed: {scan_results.get('files_processed', 0):,}")
-        logging.info(f"  Total Records Scanned: {scan_results.get('total_records_processed', 0):,}")
-        logging.info(f"  Total HTML Records Found (any domain): {scan_results.get('total_html_records_found', 0):,}")
-        logging.info(f"  Target Domain HTML Records Found: {scan_results.get('total_target_domain_hits', 0):,}")
-        logging.info(f"  Target HTML Records Extracted (Bytes): {scan_results.get('total_target_html_extracted', 0):,}")
-        logging.info(f"  Articles Inserted into Intermediate DB: {scan_results.get('total_articles_inserted', 0):,}")
-        logging.info(f"  Total HTML Bytes Extracted (Target): {scan_results.get('total_html_bytes_extracted', 0):,}")
-        logging.info(f"  Total Wall Clock Time: {scan_results.get('total_wall_time', 0):.2f} s")
-        logging.info(f"  Total CPU Time (sum): {scan_results.get('total_cpu_processing_time', 0):.2f} s")
-        if scan_results.get('errors'):
-            logging.warning(f"  Errors encountered in {len(scan_results['errors'])} file(s). Check log '{log_file_path}' for details.")
+        # --- Specific Whitelist Domain Check ---
+        # Check for domains that are on the whitelist, were found, but are NOT currently targeted.
+        logging.info("Performing specific whitelist domain check...")
+        domains_found_counts = scan_results.get('overall_domain_counts', Counter())
+        all_found_domains = set(domains_found_counts.keys())
 
-        # TODO: Implement detailed report generation to a file (e.g., markdown)
-        # Include overall domain counts: scan_results.get('overall_domain_counts')
-        # Include performance metrics, errors summary, etc.
+        # Find domains that are BOTH in the whitelist AND were found in the scan
+        found_whitelist_domains = whitelist_domains.intersection(all_found_domains)
+
+        # From those, find the ones NOT currently being targeted for extraction
+        missed_whitelist_targets = found_whitelist_domains - current_target_domains
+
+        if not missed_whitelist_targets:
+            logging.info("All found whitelist domains are already included in the target configuration.")
+        else:
+            logging.warning(f"Found {len(missed_whitelist_targets)} domains from the specific whitelist that were encountered but are NOT currently in the target list. Consider adding them:")
+            # Sort for consistent output
+            sorted_missed = sorted(list(missed_whitelist_targets))
+            for domain in sorted_missed:
+                logging.warning(f"  - Whitelist Miss: {domain} (Found Count: {domains_found_counts.get(domain, 0):,})")
 
     except Exception as e:
         logging.critical(f"An unhandled error occurred during the Stage 1 scan: {e}", exc_info=True)
@@ -719,6 +761,6 @@ def main():
 
 if __name__ == "__main__":
     # Example Usage:
-    # uv run scripts/stage1_scan_warc.py --input /path/to/warc/dir --intermediate-db ./data/intermediate/stage1_output.duckdb --truncate
-    # uv run scripts/stage1_scan_warc.py --input file1.warc.gz file2.warc.gz --intermediate-db ./inter.db --limit-records 1000 --processes 4
+    # uv run scripts/stage1_scan_warc.py --input /path/to/warc/dir --output-dir ./data/intermediate/stage1_parquet
+    # uv run scripts/stage1_scan_warc.py --input file1.warc.gz file2.warc.gz --output-dir ./output_pq --limit-records 1000 --processes 4
     main() 
