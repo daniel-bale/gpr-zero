@@ -264,7 +264,12 @@ def extract_article_content_selectolax(
     return extracted
 
 # --- Main Processing Logic ---
-def process_intermediate_data(input_dir: str | Path, final_db_conn: duckdb.DuckDBPyConnection, num_processes: int):
+def process_intermediate_data(
+    input_dir: str | Path, 
+    final_db_conn: duckdb.DuckDBPyConnection, 
+    num_processes: int,
+    final_db_path: str | Path  # Added for logging
+):
     """Reads intermediate Parquet files, parses HTML, inserts into final DB."""
     input_dir_path = Path(input_dir)
     logging.info(f"Starting Stage 2 processing from intermediate Parquet directory: {input_dir_path}")
@@ -284,8 +289,8 @@ def process_intermediate_data(input_dir: str | Path, final_db_conn: duckdb.DuckD
         # Use Polars scan_parquet for lazy loading
         logging.info(f"Scanning Parquet files in {input_dir_path}...")
         try:
-            # MODIFIED: Added include_file_paths=True. Assuming the added column is 'file_path'.
-            lazy_df = pl.scan_parquet(f"{input_dir_path}/**/*.parquet", include_file_paths=True)
+            # MODIFIED: Correctly use include_file_paths with a string for the column name
+            lazy_df = pl.scan_parquet(f"{input_dir_path}/**/*.parquet", include_file_paths="file_path")
             total_rows_estimate = lazy_df.select(pl.len()).collect().item()
             logging.info(f"Estimated {total_rows_estimate:,} total rows across Parquet files.")
         except Exception as e:
@@ -415,7 +420,7 @@ def process_intermediate_data(input_dir: str | Path, final_db_conn: duckdb.DuckD
     logging.info(f"--- Stage 2 Summary ---")
     logging.info(f"  Total Records Scanned from Parquet Files: {total_processed:,}")
     logging.info(f"  Successfully Parsed & Inserted into Final DB: {total_inserted:,}")
-    logging.info(f"  Final Database Path: {final_db_conn.database_path}")
+    logging.info(f"  Final Database Path: {final_db_path}")
     logging.info(f"  Records with Missing Data/Extraction/Insert Errors: {total_errors:,}")
     logging.info(f"  Total Processing Time: {duration:.2f} s")
     # TODO: Add reporting
@@ -437,7 +442,7 @@ def main():
         
         final_db_conn = setup_final_database(args.final_db, truncate=args.truncate)
         # Pass input_dir instead of intermediate_db
-        process_intermediate_data(input_dir, final_db_conn, args.processes)
+        process_intermediate_data(input_dir, final_db_conn, args.processes, Path(args.final_db))
     except Exception as e:
         logging.critical(f"An unhandled error occurred during the Stage 2 process: {e}", exc_info=True)
     finally:
