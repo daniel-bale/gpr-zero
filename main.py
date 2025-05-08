@@ -48,70 +48,64 @@ def load_config(config_path: str = "llm_config.yaml") -> dict:
 
 
 def generate_dictionary_command(args) -> None:
-    """Generate a dictionary using the specified strategy.
-    
-    Args:
-        args: Command line arguments
-    """
-    # Load configuration
+    """Generate a dictionary using the specified strategy."""
     config = load_config(args.config)
-    
-    # Setup logging
     setup_logging(args.log_level)
-    
-    # Get model configuration
     model_config = config.get("models", {})
     default_model = model_config.get("default", "gpt-4o-2024-08-06")
     available_models = model_config.get("options", [default_model])
-    
-    # Validate the model if specified by user
+
     if args.model and args.model not in available_models:
         logging.error(f"Error: Model '{args.model}' not found in available models.")
         logging.info(f"Available models: {', '.join(available_models)}")
         sys.exit(1)
     model_name = args.model or default_model
     
-    # Setup generation parameters
     gen_params = config.get("generation", {})
     temperature = gen_params.get("temperature", 0.0)
     
-    # Initialize prompt manager
     prompt_manager = PromptManager(
         model_name=model_name,
         temperature=temperature,
-        log_dir=args.log_dir,
-        prompts_dir=args.prompts_dir
+        log_dir=args.log_dir
     )
     
-    # Initialize dictionary generator
     dictionary_generator = DictionaryGenerator(
         prompt_manager=prompt_manager,
         output_dir=args.output_dir,
         reference_dictionary_path=args.reference_dict
     )
-    
-    # Generate dictionary using the specified strategy
-    if args.strategy == "direct":
-        dictionary_generator.generate_direct(
-            prompt_file=args.prompt_file,
-            output_name=args.output_name
+
+    # Construct the full path to the prompt file if a name is provided
+    prompt_file_full_path = None
+    if args.prompt_file:
+         prompt_file_full_path = Path(args.prompts_dir) / f"{args.prompt_file}.json"
+         if not prompt_file_full_path.exists():
+             logging.error(f"Prompt file not found: {prompt_file_full_path}")
+             sys.exit(1)
+
+    # Prepare template_args_list if role is provided
+    template_args = None
+    if args.role:
+        # Assuming the role applies to the first message (system)
+        # and the second message (user) doesn't need args.
+        template_args = [{"role": args.role}, {}] 
+
+    # Call the main generation method
+    try:
+        generated_dictionary = dictionary_generator.generate_dictionary(
+            strategy=args.strategy,
+            name=args.output_name, # Pass name for saving
+            model=args.model, # Pass model override if provided
+            temperature=temperature, # Pass configured/default temperature
+            prompt_file_path=prompt_file_full_path, # Pass the resolved path
+            template_args_list=template_args, # Pass the role args
+            save=True # Ensure saving is handled
         )
-    elif args.strategy == "translation":
-        dictionary_generator.generate_translation(
-            prompt_file=args.prompt_file,
-            reference_path=args.reference_dict,
-            output_name=args.output_name
-        )
-    elif args.strategy == "guided":
-        dictionary_generator.generate_guided(
-            prompt_file=args.prompt_file,
-            output_name=args.output_name
-        )
-    else:
-        logging.error(f"Unknown strategy: {args.strategy}")
+        logging.info(f"Dictionary generation completed using {args.strategy} strategy. Saved to {generated_dictionary.get('metadata', {}).get('filename', 'N/A')}")
+    except Exception as e:
+        logging.error(f"Dictionary generation failed: {e}", exc_info=True)
         sys.exit(1)
-    
-    logging.info(f"Dictionary generation completed using {args.strategy} strategy")
 
 
 def main() -> None:
@@ -122,12 +116,13 @@ def main() -> None:
     
     subparsers = parser.add_subparsers(dest="command", help="Commands")
     
-    # Dictionary generation command
     gen_parser = subparsers.add_parser("generate-dictionary", help="Generate a dictionary")
-    gen_parser.add_argument("--strategy", required=True, choices=["direct", "translation", "guided"], 
+    gen_parser.add_argument("--strategy", required=True, 
+                          choices=["direct", "translation", "guided", "prompt_file", "role_based_generation"], # Added new strategy
                           help="Strategy for dictionary generation")
-    gen_parser.add_argument("--prompt-file", required=True, help="Prompt file to use (without .json extension)")
+    gen_parser.add_argument("--prompt-file", help="Prompt file name (without .json) to use for relevant strategies (e.g., translation, prompt_file, role_based_generation)")
     gen_parser.add_argument("--output-name", required=True, help="Output dictionary name (without .json extension)")
+    gen_parser.add_argument("--role", help="Role to use for role_based_generation strategy (e.g., 'Taiwanese Minister of Defense')") # New argument
     gen_parser.add_argument("--reference-dict", help="Path to reference dictionary for translation strategy")
     gen_parser.add_argument("--model", help="Override the model specified in the config")
     gen_parser.add_argument("--prompts-dir", default="prompts", help="Directory containing prompt templates")
@@ -136,12 +131,17 @@ def main() -> None:
     
     args = parser.parse_args()
     
-    if args.command is None:
+    # Validation for required args based on strategy
+    if args.command == "generate-dictionary":
+        if args.strategy in ["translation", "prompt_file", "role_based_generation"] and not args.prompt_file:
+            parser.error("argument --prompt-file is required for strategy: " + args.strategy)
+        if args.strategy == "role_based_generation" and not args.role:
+            parser.error("argument --role is required for strategy: role_based_generation")
+        
+        generate_dictionary_command(args)
+    elif args.command is None:
         parser.print_help()
         sys.exit(1)
-    
-    if args.command == "generate-dictionary":
-        generate_dictionary_command(args)
     
 
 if __name__ == "__main__":

@@ -6,8 +6,11 @@ import os
 from pathlib import Path
 from datetime import datetime
 import re
+import logging
 
 from src.gpr_zero.llm.prompt_manager import PromptManager
+
+logger = logging.getLogger(__name__)
 
 
 class DictionaryGenerator:
@@ -41,6 +44,8 @@ class DictionaryGenerator:
         name: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        prompt_file_path: Path | None = None,
+        template_args_list: list[dict[str, Any]] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Generate a GPR keyword dictionary using the specified strategy.
@@ -52,35 +57,39 @@ class DictionaryGenerator:
             name: Name for the saved dictionary file
             model: Model to use (overrides default)
             temperature: Temperature to use (overrides default)
+            prompt_file_path: Full path to the prompt template file (used if strategy is 'prompt_file')
+            template_args_list: Optional list of dictionaries for template rendering (used if strategy is 'prompt_file').
             **kwargs: Additional arguments for specific strategies
 
         Returns:
-            Dictionary containing word sets and metadata
+            Dictionary containing word sets, categories, and metadata
         """
+        dictionary = {}
         # Different strategies use different methods
         if strategy == "direct":
             dictionary = self._direct_generation(categories, model, temperature)
         elif strategy == "translation":
-            dictionary = self._translation_generation(model, temperature, **kwargs)
+            if not prompt_file_path:
+                raise ValueError("prompt_file_path is required for 'translation' strategy")
+            dictionary = self._prompt_file_generation(prompt_file_path, model, temperature, template_args_list, **kwargs)
         elif strategy == "guided":
             dictionary = self._guided_generation(categories, model, temperature)
         elif strategy == "prompt_file":
-            # Use a prompt file directly
-            prompt_file = kwargs.get("prompt_file")
-            if not prompt_file:
-                raise ValueError("prompt_file parameter is required for prompt_file strategy")
-            dictionary = self._prompt_file_generation(prompt_file, model, temperature, **kwargs)
+            if not prompt_file_path:
+                raise ValueError("prompt_file_path parameter is required for 'prompt_file' strategy")
+            dictionary = self._prompt_file_generation(prompt_file_path, model, temperature, template_args_list, **kwargs)
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
-        # Add metadata if not already present
+        # Add/update metadata if not already present or fully populated
         if "metadata" not in dictionary:
-            dictionary["metadata"] = {
-                "strategy": strategy,
-                "generated_at": datetime.now().isoformat(),
-                "model": model or self.prompt_manager.model_name,
-                "temperature": temperature or self.prompt_manager.temperature
-            }
+            dictionary["metadata"] = {}
+        
+        # Ensure minimum metadata exists if not added by generator method
+        dictionary["metadata"].setdefault("strategy", strategy)
+        dictionary["metadata"].setdefault("generated_at", datetime.now().isoformat())
+        if model: dictionary["metadata"].setdefault("model_used", model)
+        if temperature: dictionary["metadata"].setdefault("temperature_used", temperature)
 
         # Save dictionary if requested
         if save:
@@ -202,47 +211,87 @@ Format your response as a JSON object where keys are categories and values are l
 
     def _prompt_file_generation(
         self,
-        prompt_file: str,
+        prompt_file_path: Path,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        template_args_list: list[dict[str, Any]] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Generate dictionary using a prompt file.
         
         Args:
-            prompt_file: Name of the prompt file (without .json extension)
-            model: Optional model override
-            temperature: Optional temperature override
-            **kwargs: Additional arguments to pass to the prompt template
+            prompt_file_path: Full path to the prompt template file.
+            model: Optional model override.
+            temperature: Optional temperature override.
+            template_args_list: Optional list of dictionaries for template rendering (e.g., containing role).
+            **kwargs: Catch-all for potential future args.
             
         Returns:
-            Generated dictionary
+            Generated dictionary including metadata, categories, and word_sets.
         """
-        # Call LLM using the prompt file
+        # Warn about unexpected kwargs if any
+        if kwargs:
+             logger.warning(f"Unexpected kwargs in _prompt_file_generation: {kwargs}")
+
+        # Load prompt file content to access its metadata
+        prompt_metadata = {}
+        try:
+            with open(prompt_file_path, 'r', encoding='utf-8') as f:
+                prompt_metadata = json.load(f).get("metadata", {})
+        except Exception as e:
+            logger.warning(f"Could not load prompt metadata from {prompt_file_path}: {e}")
+
+        # Call LLM using the prompt file path
         response = self.prompt_manager.call_llm_with_prompt_file(
-            prompt_name=prompt_file,
+            prompt_template_file=prompt_file_path,
+            template_args_list=template_args_list,
             model_override=model,
-            temperature_override=temperature,
-            **kwargs
+            temperature_override=temperature
         )
         
-        # Try to parse JSON from the response
-        result = self._extract_json_from_response(response["text"])
+        # Try to parse JSON containing categories and word_sets from the response
+        llm_output_dict = self._extract_json_from_response(response["text"])
+
+        # --- Construct final dictionary --- 
+        final_dict = {}
+
+        # 1. Build Metadata
+        metadata_dict = {}
+        generation_date = datetime.now().strftime("%Y-%m-%d")
+        model_used = response.get("metadata", {}).get("model", model or self.prompt_manager.model_name)
+        role_used = "N/A" # Default role
+        if template_args_list and len(template_args_list) > 0 and isinstance(template_args_list[0], dict):
+            role_used = template_args_list[0].get("role", "N/A") # Assuming role is in the first arg dict
+
+        metadata_dict["description"] = prompt_metadata.get("description", "GPR dictionary generated from prompt.")
+        metadata_dict["target_context"] = prompt_metadata.get("target_context", "Unknown")
+        metadata_dict["generated_by_role"] = role_used
+        metadata_dict["generation_date"] = generation_date
+        metadata_dict["model_used"] = model_used
+        metadata_dict["source_prompt_file"] = str(prompt_file_path)
+        metadata_dict["llm_request_id"] = response.get("metadata", {}).get("request_id", "N/A")
+
+        final_dict["metadata"] = metadata_dict
+
+        # 2. Add Categories and Word Sets (if valid)
+        if "error" in llm_output_dict or not isinstance(llm_output_dict, dict):
+            logger.error(f"LLM response parsing failed or returned error for {prompt_file_path}. Raw text: {response.get('text', '')}")
+            final_dict["error"] = llm_output_dict.get("error", "LLM response parsing failed.")
+            final_dict["categories"] = {}
+            final_dict["word_sets"] = {}
+            final_dict["raw_text_response"] = response.get('text', '') # Add raw text on error
+        elif "categories" not in llm_output_dict or "word_sets" not in llm_output_dict:
+            logger.error(f"LLM response missing 'categories' or 'word_sets' for {prompt_file_path}. Raw text: {response.get('text', '')}")
+            final_dict["error"] = "LLM response missing required keys."
+            final_dict["categories"] = llm_output_dict.get("categories", {})
+            final_dict["word_sets"] = llm_output_dict.get("word_sets", {})
+            final_dict["raw_text_response"] = response.get('text', '') # Add raw text on error
+        else:
+            # Looks good, add categories and word sets
+            final_dict["categories"] = llm_output_dict["categories"]
+            final_dict["word_sets"] = llm_output_dict["word_sets"]
         
-        # Add metadata
-        if "metadata" not in result:
-            result["metadata"] = {}
-            
-        result["metadata"].update({
-            "strategy": "prompt_file",
-            "prompt_file": prompt_file,
-            "generated_at": datetime.now().isoformat(),
-            "model": model or response.get("metadata", {}).get("model", self.prompt_manager.model_name),
-            "temperature": temperature or response.get("metadata", {}).get("temperature", self.prompt_manager.temperature),
-            "raw_response": response
-        })
-        
-        return result
+        return final_dict
 
     def _extract_json_from_response(self, text: str) -> Dict[str, Any]:
         """Extract JSON from LLM response text.
@@ -364,22 +413,29 @@ Format your response as a JSON object where keys are categories and values are l
 
     def generate_direct(
         self,
-        prompt_file: str,
+        prompt_file_path: Path,
         output_name: str,
         **kwargs
     ) -> dict[str, Any]:
-        """Generate a dictionary using direct prompting.
+        """Generate a dictionary using a prompt file (direct implies using a specific prompt file here).
         
         Args:
-            prompt_file: Name of the prompt file to use
+            prompt_file_path: Full path to the prompt file to use.
             output_name: Base name for the output dictionary
-            **kwargs: Additional arguments for the prompt template
-            
-        Returns:
-            Generated dictionary
         """
-        # Call LLM with prompt file
-        response = self.prompt_manager.call_llm_with_prompt_file(prompt_file, **kwargs)
+        template_args_list = kwargs.pop("template_args_list", [{}, {}])
+        model_override = kwargs.pop("model_override", None)
+        temperature_override = kwargs.pop("temperature_override", None)
+
+        if kwargs:
+            print(f"Warning: Unexpected keyword arguments in generate_direct: {kwargs}")
+
+        response = self.prompt_manager.call_llm_with_prompt_file(
+            prompt_template_file=prompt_file_path,
+            template_args_list=template_args_list,
+            model_override=model_override,
+            temperature_override=temperature_override
+        )
         
         # Extract and parse dictionary from response
         try:
@@ -406,55 +462,33 @@ Format your response as a JSON object where keys are categories and values are l
 
     def generate_translation(
         self,
-        prompt_file: str,
+        prompt_file_path: Path,
         reference_path: str | None = None,
         output_name: str | None = None,
         **kwargs
     ) -> dict[str, Any]:
-        """Generate a dictionary by translating a reference dictionary.
+        """Generate a dictionary by translating, using a specific prompt file.
         
         Args:
-            prompt_file: Name of the prompt file to use
-            reference_path: Path to the reference dictionary to translate
-            output_name: Base name for the output dictionary
-            **kwargs: Additional arguments for the prompt template
-            
-        Returns:
-            Generated dictionary
+            prompt_file_path: Full path to the prompt file to use for translation.
         """
-        # For the combined prompt, we don't need to load and pass the reference dictionary
-        # as it's already embedded in the prompt template
-        
-        # Set default output name if not provided
         if not output_name:
             output_name = "translated_dictionary"
         
-        # If reference path is provided, handle as before for backward compatibility
         if reference_path:
-            # Load reference dictionary
             reference_dict = self.load_reference_dictionary(reference_path)
-            # Add reference dictionary to kwargs
             kwargs["reference_dictionary"] = json.dumps(reference_dict, ensure_ascii=False)
         
-        # Generate dictionary with direct approach
-        return self.generate_direct(prompt_file, output_name, **kwargs)
+        return self.generate_direct(prompt_file_path, output_name, **kwargs)
 
     def generate_guided(
         self,
-        prompt_file: str,
+        prompt_file_path: Path,
         output_name: str,
         **kwargs
     ) -> dict[str, Any]:
         """Generate a dictionary using guided approach with multiple LLM calls.
-        
         Args:
-            prompt_file: Base name for the prompt files to use
-            output_name: Base name for the output dictionary
-            **kwargs: Additional arguments for the prompt template
-            
-        Returns:
-            Generated dictionary
+            prompt_file_path: Full path to the base prompt file to use.
         """
-        # This method could be implemented with multiple LLM calls for a more guided approach
-        # For now, it just uses the direct approach
-        return self.generate_direct(prompt_file, output_name, **kwargs)
+        return self.generate_direct(prompt_file_path, output_name, **kwargs)

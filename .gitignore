@@ -178,3 +178,4 @@ logs/
 *.csv
 .cursor/
 *.parquet
+data_analysis/output/**/*.json

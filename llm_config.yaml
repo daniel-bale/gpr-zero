@@ -2,17 +2,25 @@
 
 # Model configuration
 models:
-  default: "gpt-4o-2024-08-06"
+  default: "gpt-4.1-2025-04-14"
   options:
     - "gpt-4.5-preview-2025-02-27"
     - "gpt-4o-2024-08-06"
-    - "o1-2024-12-17"
-    - "o3-mini-2025-01-31"
+    - "o3-2025-04-16"
+    - "o4-mini-2025-04-16"
+    - "gpt-4.1-2025-04-14"
   
-# Generation parameters  
-generation:
-  temperature: 0.0
-  max_tokens: 2000
+# Task-specific default parameters
+task_defaults:
+  default_generation:
+    temperature: 0.2
+    max_tokens: 2000
+  spike_analysis:
+    temperature: 0.2
+    # max_tokens: can inherit from default or be specific
+  dictionary_translation:
+    temperature: 0.3
+    # max_tokens: can inherit from default or be specific
   
 # Web search capability
 web_search:
