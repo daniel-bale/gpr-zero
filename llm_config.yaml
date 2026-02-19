@@ -1,14 +1,30 @@
 # LLM configuration for GPR-Zero project
 
+# Provider configuration
+providers:
+  default: "openrouter"
+  openai:
+    base_url: null  # Uses OpenAI's default
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+
 # Model configuration
 models:
-  default: "gpt-4.1-2025-04-14"
-  options:
+  default: "google/gemini-2.5-flash"
+  openai_options:
     - "gpt-4.5-preview-2025-02-27"
     - "gpt-4o-2024-08-06"
     - "o3-2025-04-16"
     - "o4-mini-2025-04-16"
     - "gpt-4.1-2025-04-14"
+    - "gpt-4.1-mini-2025-04-14"
+  openrouter_options:
+    - "google/gemini-2.5-flash"
+    - "openai/gpt-4o"
+    - "openai/gpt-4o-mini"
+    - "anthropic/claude-3.5-sonnet"
+    - "meta-llama/llama-3.1-70b-instruct"
+    - "mistralai/mistral-large"
   
 # Task-specific default parameters
 task_defaults:
@@ -27,3 +43,4 @@ web_search:
   enabled: true
   supported_models:
     - "gpt-4o-2024-08-06"  # Currently only GPT-4o supports web search 
+    - "openai/gpt-4o"  # OpenRouter version 

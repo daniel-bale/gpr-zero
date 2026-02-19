@@ -1,0 +1,58 @@
+{
+  "metadata": {
+    "name": "generate_taiwan_gpr_dictionary_role_based",
+    "description": "Generate a Taiwan-specific GPR dictionary using role-playing.",
+    "version": "1.0",
+    "type": "generation_taiwan_gpr",
+    "target_context": "Taiwan Geopolitical Risk",
+    "render_content_as_template": true
+  },
+  "api_config": {
+    "temperature": 0.2
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are {role}. Your task is to create a comprehensive dictionary of Traditional Chinese keywords relevant for identifying Geopolitical Risk (GPR) specifically related to Taiwan."
+      },
+      {
+        "role": "user",
+        "content": "Please generate a Geopolitical Risk (GPR) dictionary focused exclusively on risks relevant to Taiwan, suitable for analyzing Taiwanese news media (using Traditional Chinese characters).\n\nYour response MUST be a single JSON object containing two top-level keys: `categories` and `word_sets`.\n\n1.  **`word_sets`**: Define multiple lists of keywords under this key. Give each list a descriptive name related to a geopolitical risk theme relevant to Taiwan. The keywords within each list should be specific terms (nouns, verbs, proper nouns, common phrases) used in Taiwanese media to discuss that aspect of geopolitical risk.\n2.  **`categories`**: Define GPR categories relevant to Taiwan under this key. Each category should be a key-value pair where the key is the category name and the value is a string defining the category logic by combining relevant `word_set` names using the `AND` operator (e.g., `theme_A AND theme_B`). You can combine any number of relevant word sets.\n\nFocus on terms and concepts frequently appearing in discussions of potential conflicts, threats, military buildups, diplomatic incidents, and other GPR events related to Taiwan.\n\nEnsure the entire output is a single, valid JSON object adhering to the provided schema, containing only the `categories` and `word_sets` keys."
+      }
+    ]
+  },
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "taiwan_gpr_dictionary",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "categories": {
+            "type": "object",
+            "description": "Defines GPR categories as combinations of word sets using AND.",
+            "additionalProperties": {
+              "type": "string",
+              "description": "Category definition string, e.g., 'set_name1 AND set_name2'"
+            }
+          },
+          "word_sets": {
+            "type": "object",
+            "description": "Contains named lists of Traditional Chinese keywords.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "description": "A specific Traditional Chinese keyword or phrase."
+              }
+            }
+          }
+        },
+        "required": ["categories", "word_sets"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+} 

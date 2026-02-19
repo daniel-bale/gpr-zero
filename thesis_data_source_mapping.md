@@ -88,7 +88,8 @@ This document traces each data point, figure, and analytical result in the thesi
 - **Table 2** (Line 72-94): Unique spikes table
   - Spike detection: `scripts/detect_gpr_spikes_unified.py`
   - Spike analysis: `scripts/analyze_step2_spike_articles_normalized.py`
-  - Summaries generation: `scripts/generate_spike_summaries_llm.py`
+  - Summaries generation: `scripts/generate_spike_summaries_llm.py` (prompt: `prompts/analyze_gpr_spike_event.json`)
+  - Summaries consolidation: `scripts/create_spike_summaries_csv.py` → `data/gpr_spikes/step2_all_spikes_summary.csv`
   - Table creation: `scripts/create_step2_unique_spikes_summary.py`
   - **Verified**: 21 Step2 spikes detected, 90% validation match with Lau
 
@@ -132,8 +133,14 @@ This document traces each data point, figure, and analytical result in the thesi
   - **Verified**: Regenerated successfully
 
 - **Table 5** (Line 225): Cross-strait security framing
-  - Source: `data_analysis/sample_divergent_articles.py`
-  - Alternative: `data_analysis/sample_divergent_articles_cached.py`
+  - Full chain:
+    1. Divergent week identification: `data_analysis/identify_divergent_weeks.py` → `data_analysis/output/divergent_coverage/divergent_weeks_detailed.json`
+    2. Article sampling: `data_analysis/sample_divergent_articles.py` (alt: `data_analysis/sample_divergent_articles_cached.py`)
+    3. LLM summarization: `data_analysis/process_divergent_summaries.py` (prompt: `prompts/summarize_divergent_coverage.json`)
+    4. Editorial analysis: `data_analysis/analyze_editorial_differences.py` → `editorial_differences.csv`
+    5. Final visualization: `data_analysis/create_final_divergence_visualization.py` → `academic_summary_table.csv`
+    6. Chinese analysis: `data_analysis/analyze_editorial_differences_chinese.py`
+    7. Divergent week visualization: `data_analysis/visualize_divergent_weeks.py`
   - **FIX**: Was incorrectly mapped to `scripts/sample_divergent_articles.py` (wrong directory)
 
 - **Figure 3.9** (Line 259): `adiz_shares_vs_invasions_weekly.png`
@@ -158,8 +165,10 @@ This document traces each data point, figure, and analytical result in the thesi
 
 ```
 Level 0: Articles DB
-   data/news/stage2_enhanced_full.duckdb (articles table)
-   Created by: stage1_scan_warc.py → stage2_parse_html_load_db.py
+   Scripts: scripts/stage1_scan_warc.py → scripts/stage2_parse_html_load_db.py
+   WARC input:      /home5/chuenho/data/crawl-data/CC-NEWS/{YYYY}/{MM}/*.warc.gz  (25,086 files, ~25TB)
+   Stage 1 parquet: /home5/chuenho/data/news/stage1_parquet/{YYYY}/{MM}/*.parquet  (43,950 files, ~320GB)
+   Stage 2 DB:      /home5/chuenho/data/news/stage2_enhanced_full.duckdb           (108GB, articles table)
 
 Level 1: Binary Matrix (CACHED TABLE)
    Table: gpr_binary_matrix_all_words (6,441,601 rows, 3,341 word columns)
@@ -222,6 +231,16 @@ Level 5: Thesis Figures & Tables (see Figure/Table entries above)
 | 3.9 | stage2_enhanced_full.duckdb + ADIZ_invasion.csv | 0 + external |
 | 3.10 | var_ready_gpr_taiwan_step2_median.parquet | SVAR preprocessing |
 
+## Planned/Unfinished Thesis Content
+
+### Category Peak Event Analysis
+- Scripts:
+  - `scripts/analyze_category_peak_events.py` (prompt: `prompts/analyze_category_peak_event.json`)
+  - `scripts/analyze_category_peak_events_updated.py`
+  - `data_analysis/capture_category_peak_events.py`
+- Output: `data/category_contributions/peak_events/*.json`
+- Status: LLM-generated peak event descriptions exist but not yet incorporated into thesis
+
 ## Additional Scripts for Thesis Figure Generation
 - Master script for all thesis figures: `scripts/create_thesis_figures.py`
 - Regeneration script: `scripts/regenerate_thesis_figures.py`
@@ -234,6 +253,16 @@ Level 5: Thesis Figures & Tables (see Figure/Table entries above)
 5. **GPR calculation**: `src/gpr_zero/gpr_index/calculator.py`, `src/gpr_zero/gpr_index/calculator_binary_matrix.py`
 6. **Intermediate data**: See dependency chain above
 7. **Analysis & visualization**: Various scripts in `scripts/` and `data_analysis/`
+
+## Prompt Templates
+| Prompt | Used By | Purpose |
+|--------|---------|---------|
+| `prompts/caldara_translation_combined.json` | `src/gpr_zero/llm/` | Caldara keyword translation |
+| `prompts/generate_taiwan_gpr_dictionary_role_based.json` | `scripts/batch_generate_step1.py` | Step1 dictionary generation |
+| `prompts/generate_taiwan_gpr_dictionary_stable_8categories.json` | `scripts/batch_generate_step2.py` | Step2 dictionary generation |
+| `prompts/analyze_gpr_spike_event.json` | `scripts/generate_spike_summaries_llm.py` | Spike event LLM summaries (Table 2) |
+| `prompts/analyze_category_peak_event.json` | `scripts/analyze_category_peak_events.py` | Category peak event analysis (planned) |
+| `prompts/summarize_divergent_coverage.json` | `data_analysis/process_divergent_summaries.py` | Divergent coverage LLM summaries (Table 5) |
 
 ## Key Databases
 - Main article database: `data/news/stage2_enhanced_full.duckdb`

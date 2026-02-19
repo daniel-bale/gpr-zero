@@ -1,0 +1,62 @@
+{
+  "metadata": {
+    "name": "generate_taiwan_gpr_dictionary_stable_8categories",
+    "description": "Generate a Taiwan-specific GPR dictionary with stable 8-category structure.",
+    "version": "1.0",
+    "type": "generation_taiwan_gpr",
+    "target_context": "Taiwan Geopolitical Risk",
+    "render_content_as_template": false
+  },
+  "api_config": {
+    "temperature": 0.2
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are an expert in Taiwan's geopolitical risks. Your task is to create a comprehensive dictionary of Traditional Chinese keywords for identifying Geopolitical Risk (GPR) specifically related to Taiwan."
+      },
+      {
+        "role": "user",
+        "content": "Please generate a Geopolitical Risk (GPR) dictionary focused exclusively on risks relevant to Taiwan, suitable for analyzing Taiwanese news media (using Traditional Chinese characters).\n\nYour response MUST be a single JSON object containing two top-level keys: `categories` and `word_sets`.\n\nSTRICT REQUIREMENTS:\n1. Create EXACTLY 8 categories - no more, no less\n2. Categories MUST be these 8 (you may use slight variations in naming but must cover these concepts):\n   - Military Escalation (軍事升級) - military threats, exercises, deployments, cross-strait military tensions\n   - Internal Political Instability (內部政治不穩定) - domestic unrest, political polarization, internal security threats\n   - Economic Coercion (經濟脅迫) - sanctions, trade restrictions, supply chain pressure\n   - Diplomatic Isolation (外交孤立) - international recognition challenges, diplomatic pressure\n   - Cyber and Information Warfare (網路與資訊戰) - cyber attacks, disinformation, cognitive warfare\n   - US-China-Taiwan Relations (美中台關係) - trilateral dynamics, strategic competition\n   - Regional Security (區域安全) - Asia-Pacific tensions, alliance dynamics\n   - Gray Zone Operations (灰色地帶行動) - hybrid warfare below war threshold\n\n3. **`word_sets`**: Define multiple lists of keywords under this key. Give each list a descriptive name related to the risk themes. Each list should contain 15-25 Traditional Chinese terms/phrases used in Taiwanese media.\n\n4. **`categories`**: Each category should combine relevant word_set names using ONLY the `AND` operator (e.g., `military_threats AND cross_strait_tensions`). Do NOT use OR operators.\n\n5. Ensure diversity in term selection across runs while maintaining relevance to Taiwan's context.\n\nFocus on terms frequently appearing in discussions of potential conflicts, threats, military buildups, diplomatic incidents, and other GPR events related to Taiwan.\n\nEnsure the entire output is a single, valid JSON object containing only the `categories` and `word_sets` keys."
+      }
+    ]
+  },
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "taiwan_gpr_dictionary_8categories",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "categories": {
+            "type": "object",
+            "description": "Defines exactly 8 GPR categories as combinations of word sets using AND.",
+            "additionalProperties": {
+              "type": "string",
+              "description": "Category definition string using AND operator, e.g., 'set_name1 AND set_name2'"
+            },
+            "minProperties": 8,
+            "maxProperties": 8
+          },
+          "word_sets": {
+            "type": "object",
+            "description": "Contains named lists of Traditional Chinese keywords.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "description": "A specific Traditional Chinese keyword or phrase."
+              },
+              "minItems": 15,
+              "maxItems": 25
+            }
+          }
+        },
+        "required": ["categories", "word_sets"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+}

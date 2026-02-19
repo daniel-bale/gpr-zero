@@ -1,0 +1,29 @@
+{
+  "name": "summarize_divergent_coverage",
+  "description": "Generate neutral summaries of news events during periods of divergent newspaper coverage",
+  "version": "1.0",
+  "metadata": {
+    "render_content_as_template": true
+  },
+  "api_config": {
+    "model": "google/gemini-2.5-flash-lite-preview-06-17",
+    "temperature": 0.3
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are a neutral news analyst tasked with summarizing events based on news articles. Your goal is to provide objective, factual summaries without interpreting or predicting."
+      },
+      {
+        "role": "user",
+        "content": "{content}"
+      }
+    ],
+    "text": {
+      "format": {
+        "type": "text"
+      }
+    }
+  }
+}

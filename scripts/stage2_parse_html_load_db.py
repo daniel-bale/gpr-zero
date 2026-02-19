@@ -41,6 +41,8 @@ FINAL_SCHEMA = f"""
 # TODO: Move to a config file (e.g., config.yaml)
 # Using only default selectors for initial testing.
 # Domain-specific overrides can be added later based on results.
+# UPDATED: Added enhanced selectors based on Phase 2 critical analysis (2025-06-01)
+# UPDATED: Added Phase 5 remaining problem fixes (2025-06-01)
 DOMAIN_SELECTORS = {
     "default": { # Keep defaults as a fallback, slightly expanded
         "title": ["title", "h1", 'meta[property="og:title"]', 'meta[name="twitter:title"]'],
@@ -53,26 +55,89 @@ DOMAIN_SELECTORS = {
             'time[datetime][pubdate]', 'time[datetime]'
         ]
     },
+    "peoplenews.tw": { # People News (民報) - CRITICAL FIX for 0.01% extraction rate
+        "title": ['meta[property="og:title"]', "h1", "title"],
+        "content": ["#main"],  # Phase 2 analysis: 100% coverage, avg 1784 chars
+        "date": ['meta[property="article:published_time"]', 'meta[name="pubdate"]', 'time[datetime]']
+    },
+    "cna.com.tw": { # Central News Agency (中央社) - MAJOR FIX for 93.14% extraction rate  
+        "title": ['meta[property="og:title"]', "h1", "title"],
+        "content": ['[class*="content"]', '[class*="news"]', 'div[class*="text"]'],  # Phase 2: top 3 selectors
+        "date": ['meta[property="article:published_time"]', 'meta[name="pubdate"]', 'time[datetime]']
+    },
+    "nownews.com": { # Now News (今日新聞) - PHASE 5 FIX for 0% extraction in 2020
+        "title": ['meta[property="og:title"]', "h1", "title"],
+        "content": [
+            ".entry-content",     # Common WordPress/CMS content selector
+            ".post-content",      # Alternative post content selector
+            ".article-content",   # Generic article content selector
+            "#content",           # Simple content ID selector
+            ".content",           # Basic content class selector
+            "article",            # HTML5 article element
+            "main"                # HTML5 main element
+        ],
+        "date": ['meta[property="article:published_time"]', 'meta[name="pubdate"]', 'time[datetime]']
+    },
+    "taiwannews.com.tw": { # Taiwan News - PHASE 5 FIX for 91% extraction in 2021-06
+        "title": ['meta[property="og:title"]', "h1", "title"],
+        "content": [
+            ".post-content",      # Common post content selector
+            ".entry-content",     # WordPress entry content selector
+            ".article-body",      # Article body selector
+            ".content-area",      # Content area selector
+            ".article-content",   # Generic article content
+            "article",            # HTML5 article element
+            "main"                # HTML5 main element
+        ],
+        "date": ['meta[property="article:published_time"]', 'meta[name="pubdate"]', 'time[datetime]']
+    },
     "ltn.com.tw": { # Liberty Times
         "title": ['meta[property="og:title"]', "h1.article-title", "h1"],
         "content": ["div.text", "div.articlebody", "div.news_content"], # div.text is often good for ltn
         "date": ['meta[property="article:published_time"]', 'span.time', 'meta[name="pubdate"]']
     },
-    "news.ltn.com.tw": { # Liberty Times (news subdomain) - often similar structure
+    "news.ltn.com.tw": { # Liberty Times (news subdomain) - ENHANCED based on Phase 2 analysis
         "title": ['meta[property="og:title"]', "h1.article-title", "h1"],
-        "content": ["div.text", "div.articlebody", "div.news_content"],
+        "content": [".content", '[class*="content"]', "div.text", "div.articlebody", "div.news_content"],  # Added Phase 2 recommendations
         "date": ['meta[property="article:published_time"]', 'span.time', 'meta[name="pubdate"]']
     },
-    "udn.com": { # United Daily News
+    "udn.com": { # United Daily News - ENHANCED for Phase 5 (2018 extraction issues)
         "title": ["#story_art_title", 'meta[property="og:title"]', "h1"],
-        # Use broader selectors and implement cleaning logic below
-        "content": ["#story_body_content", ".story__content", "article"],
+        # Enhanced with additional selectors for historical periods (2018)
+        "content": [
+            "#story_body_content",   # Modern UDN selector
+            ".story__content",       # Alternative story content
+            ".article-content",      # Generic article content
+            "#story_body",           # Historical story body ID
+            ".story-body",           # Historical story body class
+            ".content-article",      # Article content class
+            "article",               # HTML5 article element
+            ".post-content",         # Post content fallback
+            "main"                   # HTML5 main element
+        ],
         "date": ['meta[name="date"]', '.story_bady_info_author span:first-child', '.shareBar__info--author span:first-child']
     },
-    "chinatimes.com": { # China Times - current defaults seem to work, but let's be explicit
-        "title": [".article-title", 'meta[property="og:title"]', "h1"],
-        "content": [".article-body", "article .post-content", "div.article-content-wrapper"], # Targeting more specific article containers
-        "date": ['meta[property="article:published_time"]', 'time.meta-data', 'meta[name="pubdate"]']
+    "chinatimes.com": { # China Times - Updated for 2016+ compatibility
+        "title": [".article-title", 'meta[property="og:title"]', "h1", "title"],
+        "content": [
+            # Modern selectors (for newer articles)
+            ".article-body", "article .post-content", "div.article-content-wrapper",
+            # 2016 era selectors - content appears as paragraphs after article_info
+            "article", "main", 
+            # Fallback: all paragraphs (will be filtered for substantial content)
+            "p"
+        ], 
+        "date": ['meta[property="article:published_time"]', 'time.meta-data', 'meta[name="pubdate"]', 'time[datetime]']
+    },
+    "taipeitimes.com": { # Taipei Times - Fixed based on HTML structure investigation
+        "title": ['meta[property="og:title"]', "title", "h1"],
+        "content": [
+            # Primary content container identified in investigation
+            "div.text", ".text",
+            # Fallback selectors
+            "article", "main", "p"
+        ],
+        "date": ['meta[property="article:published_time"]', 'meta[name="pubdate"]', 'time[datetime]']
     }
 }
 
@@ -98,6 +163,10 @@ def parse_arguments():
     parser.add_argument("--log-dir",
                         help="Directory for log files.",
                         default=str(DEFAULT_LOG_DIR))
+    parser.add_argument("--years",
+                        help="Specific years to process (e.g., --years 2016 2017 2023). If not specified, processes all years.",
+                        nargs='+',
+                        type=int)
     # TODO: Add argument for config file path (for selectors) later
     # parser.add_argument("--config", help="Path to config file (YAML/JSON) for selectors.", default="config.yaml")
 
@@ -230,6 +299,30 @@ def extract_article_content_selectolax(
                     # Apply a length limit to avoid excessively large content fields
                     extracted_content = raw_content[:20000] # Limit length
                     break # Stop after finding the first non-empty content
+            
+            # Special handling for China Times when using 'p' selector
+            elif selector == "p" and domain == "chinatimes.com":
+                # For China Times 2016, collect all substantial paragraphs
+                all_paragraphs = root.css(selector)
+                if all_paragraphs:
+                    paragraph_texts = []
+                    for p_node in all_paragraphs:
+                        p_text = p_node.text(strip=True)
+                        # Filter out short paragraphs (likely navigation/ads)
+                        # and paragraphs that are likely not article content
+                        if (p_text and len(p_text) > 30 and 
+                            not any(skip_word in p_text.lower() for skip_word in 
+                                   ['廣告', '推薦', '按讚', '分享', '留言', 'facebook', 'twitter', 
+                                    'weibo', 'line', '點閱', '更多', 'javascript', 'comscore'])):
+                            paragraph_texts.append(p_text)
+                    
+                    if paragraph_texts:
+                        # Combine paragraphs with proper spacing
+                        combined_content = ' '.join(paragraph_texts)
+                        if len(combined_content) > 100:  # Ensure substantial content
+                            extracted_content = combined_content[:20000]  # Apply length limit
+                            break
+        
         extracted["content"] = extracted_content
 
         # --- Extract Publish Date ---
@@ -268,11 +361,15 @@ def process_intermediate_data(
     input_dir: str | Path, 
     final_db_conn: duckdb.DuckDBPyConnection, 
     num_processes: int,
-    final_db_path: str | Path  # Added for logging
+    final_db_path: str | Path,  # Added for logging
+    years: list[int] | None = None  # Added for year filtering
 ):
     """Reads intermediate Parquet files, parses HTML, inserts into final DB."""
     input_dir_path = Path(input_dir)
     logging.info(f"Starting Stage 2 processing from intermediate Parquet directory: {input_dir_path}")
+    
+    if years:
+        logging.info(f"Year filtering enabled: {years}")
 
     if not input_dir_path.is_dir():
         logging.error(f"Input directory not found or is not a directory: {input_dir_path}. Cannot proceed.")
@@ -286,11 +383,21 @@ def process_intermediate_data(
     try:
         # --- Removed Intermediate DB Connection ---
 
-        # Use Polars scan_parquet for lazy loading
+        # Use Polars scan_parquet for lazy loading with year filtering
         logging.info(f"Scanning Parquet files in {input_dir_path}...")
         try:
-            # MODIFIED: Correctly use include_file_paths with a string for the column name
-            lazy_df = pl.scan_parquet(f"{input_dir_path}/**/*.parquet", include_file_paths="file_path")
+            # Build parquet file pattern based on years
+            if years:
+                # Create patterns for specific years: 2016/**/*.parquet, 2017/**/*.parquet, etc.
+                year_patterns = [f"{input_dir_path}/{year}/**/*.parquet" for year in years]
+                logging.info(f"Scanning parquet files for years: {years}")
+                logging.info(f"Patterns: {year_patterns}")
+                # MODIFIED: Scan multiple patterns for specific years
+                lazy_df = pl.scan_parquet(year_patterns, include_file_paths="file_path")
+            else:
+                # Original behavior: scan all parquet files
+                lazy_df = pl.scan_parquet(f"{input_dir_path}/**/*.parquet", include_file_paths="file_path")
+            
             total_rows_estimate = lazy_df.select(pl.len()).collect().item()
             logging.info(f"Estimated {total_rows_estimate:,} total rows across Parquet files.")
         except Exception as e:
@@ -442,7 +549,7 @@ def main():
         
         final_db_conn = setup_final_database(args.final_db, truncate=args.truncate)
         # Pass input_dir instead of intermediate_db
-        process_intermediate_data(input_dir, final_db_conn, args.processes, Path(args.final_db))
+        process_intermediate_data(input_dir, final_db_conn, args.processes, Path(args.final_db), args.years)
     except Exception as e:
         logging.critical(f"An unhandled error occurred during the Stage 2 process: {e}", exc_info=True)
     finally:

@@ -104,7 +104,9 @@ TAIWANESE_DOMAINS_CONFIG = [
     {"name": "Taipei Times", "domains": ["taipeitimes.com"], "is_english": True},
     {"name": "Taiwan News", "domains": ["taiwannews.com.tw"], "is_english": True},
     # Added based on whitelist check
-    {"name": "The News Lens (關鍵評論網)", "domains": ["thenewslens.com"], "is_english": False} # Assuming Chinese source primarily
+    {"name": "The News Lens (關鍵評論網)", "domains": ["thenewslens.com"], "is_english": False}, # Assuming Chinese source primarily
+    {"name": "Commercial Times (工商時報)", "domains": ["ctee.com.tw"], "is_english": False},
+    {"name": "People News (民報)", "domains": ["peoplenews.tw"], "is_english": False}
 ]
 
 def load_domain_config(config_data: list[dict]) -> tuple[dict[str, str], set[str], dict[str, bool]]:
@@ -243,7 +245,7 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
 
                     # --- Process Target Record (Parse HTTP, Check Type, Extract Bytes) ---
                     try:
-                        record.parse_http(auto_decode='content') # Handle headers & decompression
+                        record.parse_http() # Handle headers. auto_decode='none' by default.
 
                         content_type = record.http_content_type
                         if content_type and 'html' in content_type.lower():
@@ -310,15 +312,7 @@ def process_warc_file_stage1(args_tuple: tuple) -> dict:
                 # Polars handles aware datetime objects well, but conversion might be needed depending on Stage 2
                 output_df = pl.DataFrame(extracted_articles_data) # Schema inferred here
 
-                # MODIFIED: Parquet filename generation
-                # Remove .warc.gz, .warc.lz4, then add .parquet
-                base_for_parquet = file_basename
-                if base_for_parquet.endswith(".warc.gz"):
-                    base_for_parquet = base_for_parquet[:-len(".warc.gz")]
-                elif base_for_parquet.endswith(".warc.lz4"):
-                    base_for_parquet = base_for_parquet[:-len(".warc.lz4")]
-                # Add other extensions if necessary
-                
+                base_for_parquet = warc_file_path.stem
                 output_filename = f"{base_for_parquet}.parquet"
                 
                 output_path = output_subdir_path / output_filename

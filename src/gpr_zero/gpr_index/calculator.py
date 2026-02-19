@@ -38,6 +38,7 @@ class GPRCalculator:
             dictionary_path: Path to the JSON GPR dictionary file.
                              Expected format: {"word_sets": {...}, "categories": {...}}
         """
+        self.dictionary_path = dictionary_path
         self.word_sets: Dict[str, List[str]] = {}
         self.category_definitions: Dict[str, str] = {}
         self._load_structured_dictionary(dictionary_path)
@@ -80,19 +81,64 @@ class GPRCalculator:
         # Case-insensitive multi-word pattern using ibis/SQL compatible regex features
         return f"(?i)({'|'.join(escaped_words)})"
 
-    def prepare(self, articles_table: ir.Table) -> ir.Table:
+    def _get_labeled_table_name(self) -> str:
+        """Generates a sanitized table name from the dictionary path."""
+        dict_name = Path(self.dictionary_path).stem
+        # Sanitize the name to be a valid SQL identifier (replace non-word chars with _)
+        sanitized_name = re.sub(r'\W', '_', dict_name)
+        return f"gpr_labeled_{sanitized_name}"
+
+    def prepare(self,
+                articles_table: ir.Table,
+                materialize: bool = False,
+                force_recalculate: bool = False,
+                overwrite: bool = False) -> ir.Table:
         """
         Labels the input ibis table with GPR categories based on content and metadata.
+
+        This version adds options to materialize the prepared table in the database
+        for performance and reuse, and to force recalculation if needed.
 
         Args:
             articles_table: An ibis table containing article data. Must include
                             'content', 'source_file', 'category', and 'date' columns.
+            materialize: If True, the labeled table will be saved as a new table
+                         in the database. The table name is derived from the
+                         GPR dictionary filename. Defaults to False.
+            force_recalculate: If True, forces recalculation even if a materialized
+                               table exists. Defaults to False.
+            overwrite: If True, allows overwriting an existing materialized table.
+                       Used in conjunction with `materialize=True`. If False,
+                       an error will be raised on attempting to overwrite.
+                       Defaults to False.
 
         Returns:
             An ibis table expression with added boolean columns for each word set
             (has_SETNAME), each category (is_CATEGORYNAME), and an overall match
-            indicator (matches_any_category).
+            indicator (matches_any_category). If `materialize` is True, this
+            will be a reference to the newly created/loaded table in the database.
         """
+        if materialize:
+            table_name = self._get_labeled_table_name()
+            try:
+                con = articles_table._find_backend()
+                table_exists = table_name in con.list_tables()
+
+                if table_exists and not force_recalculate:
+                    logger.info(f"Loading existing materialized table: '{table_name}'")
+                    self.labeled_articles_table = con.table(table_name)
+                    return self.labeled_articles_table
+
+                if table_exists and force_recalculate:
+                    if overwrite:
+                        logger.info(f"'{table_name}' exists but force_recalculate is True. It will be overwritten.")
+                    else:
+                        logger.warning(f"'{table_name}' exists and force_recalculate is True, but overwrite is False. The result will be calculated but not materialized to avoid an error.")
+
+            except Exception as e:
+                logger.warning(f"Could not check for materialized table. Proceeding with in-memory calculation. Error: {e}")
+                materialize = False # Fallback to not materializing if backend check fails
+
         logger.info("Preparing article table for GPR calculation...")
         required_columns = ['content', 'source_file', 'category', 'date']
         if not all(col in articles_table.columns for col in required_columns):
@@ -127,8 +173,37 @@ class GPRCalculator:
 
         for category_name, query_string in self.category_definitions.items():
             col_name = f"is_{category_name}"
-            # Handle potential Proquest operators like N/2 (simplistically ignore for now)
-            required_list_names = [name.split("N/")[0].strip() for name in query_string.split("+")]
+            
+            # Revised parsing for category definitions to handle " AND " and then "N/"
+            # Example query_string: "word_set_A AND word_set_B"
+            # Or, if ProQuest was mixed (though not current use case): "word_set_A N/2 AND word_set_B"
+            
+            # Split by " AND " first
+            components = [comp.strip() for comp in query_string.split(" AND ")]
+            
+            # Then, for each component, handle potential "N/" (ProQuest-like syntax)
+            # and strip whitespace to get the actual word set name.
+            # This also handles the case where the original category was just "+" separated,
+            # assuming those are now represented as single components after an " AND " split
+            # or if " AND " was not present at all.
+            required_list_names = []
+            for component in components:
+                # If "+" is still present within a component (e.g. from an older format not yet updated),
+                # split by "+" as a fallback for that component.
+                # This makes it robust to "set_A + set_B AND set_C" if such a mixed case arises,
+                # though ideally dictionaries should consistently use "AND".
+                sub_components = [name.strip() for name in component.split("+")]
+                for sub_comp_name in sub_components:
+                    # Handle N/ operator part for each sub-component
+                    actual_list_name = sub_comp_name.split("N/")[0].strip()
+                    if actual_list_name: # Ensure not empty string
+                        required_list_names.append(actual_list_name)
+            
+            if not required_list_names:
+                logger.warning(f"No valid word set names found in query_string: '{query_string}' for category '{category_name}'. Skipping.")
+                category_columns[col_name] = ibis.literal(False)
+                all_category_match_expressions.append(ibis.literal(False))
+                continue
 
             content_match_expr = None
             valid_definition = True
@@ -176,7 +251,21 @@ class GPRCalculator:
 
         labeled_table = labeled_table.mutate(matches_any_category=matches_any_category_expr)
 
-        self.labeled_articles_table = labeled_table
+        if materialize:
+            table_name = self._get_labeled_table_name()
+            logger.info(f"Attempting to materialize labeled table as '{table_name}' (overwrite={overwrite})...")
+            try:
+                con = articles_table._find_backend()
+                # Use overwrite=True. It handles creation and replacement.
+                con.create_table(table_name, labeled_table, overwrite=overwrite)
+                self.labeled_articles_table = con.table(table_name)
+                logger.info(f"Successfully materialized and loaded table '{table_name}'.")
+            except Exception as e:
+                logger.error(f"Failed to materialize table '{table_name}'. Returning in-memory expression. Error: {e}")
+                self.labeled_articles_table = labeled_table # Fallback
+        else:
+            self.labeled_articles_table = labeled_table
+
         logger.info(f"Article table preparation complete. Labeled table schema: {list(self.labeled_articles_table.columns)}")
         return self.labeled_articles_table
 
@@ -255,6 +344,11 @@ class GPRCalculator:
                 category_count_aggs[f"{category_name}{count_suffix}"] = getattr(query_table, is_col_name).sum().cast('int64')
             else:
                  logger.warning(f"Category column '{is_col_name}' not found during aggregation. Skipping count.")
+
+        # Add unique date count when time bucketing is used
+        if time_bucket:
+            unique_date_count_agg = query_table[time_col].nunique().name("unique_dates_in_bucket")
+            aggregations["unique_dates_in_bucket"] = unique_date_count_agg
 
         if not calculate_share:
             # Aggregate counts

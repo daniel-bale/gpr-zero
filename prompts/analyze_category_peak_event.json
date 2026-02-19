@@ -1,0 +1,49 @@
+{
+  "metadata": {
+    "name": "analyze_category_peak_event",
+    "description": "Analyzes category-specific GPR peak events based on news articles to understand what drove each category to its highest levels",
+    "version": "1.0"
+  },
+  "api_config": {
+    "temperature": 0.3,
+    "max_tokens": 1000
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are a geopolitical risk analysis expert specializing in Taiwan's security environment. Your task is to analyze news articles from Taiwanese media during peak periods for specific GPR (Geopolitical Risk) categories to understand what events drove the highest risk levels."
+      },
+      {
+        "role": "user",
+        "content": "I need you to analyze a peak period for the GPR category '{category_name}' from the {dictionary_name} dictionary. This peak occurred during the week of {peak_week}, when this category reached its highest share of {peak_share:.4f} and contributed {contribution_percent:.2f}% to the overall GPR index.\n\nPlease analyze the following news articles from Taiwanese media during this peak period and explain what geopolitical events or developments drove this category to its highest levels:\n\n{articles_summary}\n\nBased on your analysis of these articles, please provide a structured response in JSON format with the following fields:\n\n1. 'analysis': A detailed analysis (200-300 words) explaining what specific geopolitical events, developments, or tensions drove this category to peak during this period\n2. 'event_summary': A concise 1-2 sentence summary of the main event or development that caused this peak\n3. 'keywords': A list of 5-8 key terms or phrases that capture the main themes, events, or actors involved\n\nFocus on:\n- Specific events, announcements, or developments mentioned in the articles\n- How these events relate to the GPR category '{category_name}'\n- The geopolitical context and implications for Taiwan\n- Any escalation patterns or triggers mentioned\n\nProvide your response as valid JSON only, without any additional text or formatting."
+      }
+    ],
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "category_peak_analysis_response",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "analysis": {
+              "type": "string",
+              "description": "A detailed analysis (200-300 words) explaining what specific geopolitical events, developments, or tensions drove this category to peak during this period"
+            },
+            "event_summary": {
+              "type": "string",
+              "description": "A concise 1-2 sentence summary of the main event or development that caused this peak"
+            },
+            "keywords": {
+              "type": "string",
+              "description": "A comma-separated list of 5-8 key terms or phrases that capture the main themes, events, or actors involved"
+            }
+          },
+          "required": ["analysis", "event_summary", "keywords"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+} 

@@ -20,7 +20,8 @@ class PromptManager:
         model_name: str | None = None,
         log_dir: str = "logs/llm",
         temperature: float | None = None,
-        config_file_path: str | Path = "llm_config.yaml"
+        config_file_path: str | Path = "llm_config.yaml",
+        provider: str | None = None
     ):
         """Initialize the prompt manager.
 
@@ -29,9 +30,14 @@ class PromptManager:
             log_dir: Directory to store logs.
             temperature: Optional override for the default temperature from config.
             config_file_path: Path to the LLM configuration YAML file.
+            provider: Optional override for the default provider from config ('openai' or 'openrouter').
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set up logging (logger needs to be available before config loading potentially fails)
+        self.logger = logging.getLogger("llm_prompt_manager")
+        self.logger.setLevel(logging.INFO)
 
         # Load configuration from YAML
         self.config_data = None
@@ -43,29 +49,53 @@ class PromptManager:
         except Exception as e:
             self.logger.error(f"Error loading LLM config from {config_file_path}: {e}. Using hardcoded defaults or __init__ args.")
 
-        # Set model and temperature from config or fallbacks/overrides
+        # Set provider from config or fallback/override
         if self.config_data:
+            default_provider_from_config = self.config_data.get("providers", {}).get("default", "openai")
             default_model_from_config = self.config_data.get("models", {}).get("default", "gpt-4")
             default_temp_from_config = self.config_data.get("task_defaults", {}).get("default_generation", {}).get("temperature", 0.0)
         else:
-            default_model_from_config = "gpt-4" # Hardcoded fallback
-            default_temp_from_config = 0.0    # Hardcoded fallback
+            default_provider_from_config = "openai"  # Hardcoded fallback
+            default_model_from_config = "gpt-4"  # Hardcoded fallback
+            default_temp_from_config = 0.0  # Hardcoded fallback
 
+        self.provider = provider if provider is not None else default_provider_from_config
         self.model_name = model_name if model_name is not None else default_model_from_config
         self.temperature = temperature if temperature is not None else default_temp_from_config
 
-        # Set up logging (logger needs to be available before config loading potentially fails)
-        self.logger = logging.getLogger("llm_prompt_manager")
-        self.logger.setLevel(logging.INFO)
-        
-        # Initialize OpenAI client if environment variable exists
+        # Initialize appropriate client based on provider
+        self.client = None
+        if self.provider == "openrouter":
+            self._init_openrouter_client()
+        else:  # Default to OpenAI
+            self._init_openai_client()
+
+    def _init_openai_client(self):
+        """Initialize OpenAI client."""
         if os.environ.get("OPENAI_API_KEY"):
             self.client = openai.OpenAI(
                 api_key=os.environ.get("OPENAI_API_KEY")
             )
+            self.logger.info("Initialized OpenAI client")
         else:
             self.client = None
             self.logger.warning("OPENAI_API_KEY not found in environment variables")
+
+    def _init_openrouter_client(self):
+        """Initialize OpenRouter client."""
+        if os.environ.get("OPENROUTER_API_KEY"):
+            self.client = openai.OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ.get("OPENROUTER_API_KEY")
+            )
+            self.logger.info("Initialized OpenRouter client")
+        else:
+            self.client = None
+            self.logger.warning("OPENROUTER_API_KEY not found in environment variables")
+
+    def _make_api_call(self, api_params: dict[str, Any]) -> Any:
+        """Make API call with appropriate client based on provider."""
+        return self.client.chat.completions.create(**api_params)
 
     def load_prompt_template(self, template_file: str | Path) -> dict[str, Any]:
         """Load a prompt template from file.
@@ -218,7 +248,7 @@ class PromptManager:
         request_id = self._log_request(
             prompt=representative_rendered_prompt,
             system_message=None, 
-            params={"model": model, "temperature": temperature},
+            params={"model": model, "temperature": temperature, "provider": self.provider},
             template_name=template_actual_name,
             template_args=template_args_list # Pass original, could be None
         )
@@ -226,7 +256,7 @@ class PromptManager:
         # Make the API call
         if self.client:
             try:
-                response = self.client.chat.completions.create(**api_params)
+                response = self._make_api_call(api_params)
                 
                 result_text = response.choices[0].message.content
                 result = {
@@ -252,9 +282,9 @@ class PromptManager:
                     "error": error_details
                 }
         else:
-            self.logger.warning("No OpenAI client available, using mock response")
+            self.logger.warning(f"No {self.provider.upper()} client available, using mock response")
             result = {
-                "text": "This is a mock response as no OpenAI API key was provided.",
+                "text": f"This is a mock response as no {self.provider.upper()} API key was provided.",
                 "mock": True
             }
             
@@ -264,6 +294,7 @@ class PromptManager:
             "prompt_name": template_actual_name,
             "model": model,
             "temperature": temperature,
+            "provider": self.provider,
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id
         }
@@ -321,7 +352,7 @@ class PromptManager:
         request_id = self._log_request(
             prompt=rendered_prompt_content, # Representative prompt for logging
             system_message=rendered_system_message_content, # Log rendered system message if any
-            params={"model": model, "temperature": temperature}, # Actual params used
+            params={"model": model, "temperature": temperature, "provider": self.provider}, # Actual params used
             template_name=template_name, # Conceptual template name
             template_args=current_template_args
         )
@@ -329,7 +360,7 @@ class PromptManager:
         # Make the API call
         if self.client:
             try:
-                response = self.client.chat.completions.create(**api_call_params)
+                response = self._make_api_call(api_call_params)
                 result_text = response.choices[0].message.content
                 result = {
                     "text": result_text,
@@ -346,9 +377,9 @@ class PromptManager:
                     "error": error_details
                 }
         else:
-            self.logger.warning("No OpenAI client available, using mock response (call_llm)")
+            self.logger.warning(f"No {self.provider.upper()} client available, using mock response (call_llm)")
             result = {
-                "text": "This is a mock response as no OpenAI API key was provided.",
+                "text": f"This is a mock response as no {self.provider.upper()} API key was provided.",
                 "mock": True
             }
 
@@ -358,6 +389,7 @@ class PromptManager:
             "prompt_name": template_name if template_name else "ad_hoc_prompt",
             "model": model,
             "temperature": temperature,
+            "provider": self.provider,
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id
         }
@@ -391,7 +423,8 @@ class PromptManager:
             "timestamp": timestamp,
             "model": params.get("model", self.model_name), # Log actual model used
             "temperature": params.get("temperature", self.temperature), # Log actual temp used
-            "params_other": {k: v for k, v in (params or {}).items() if k not in ["model", "temperature"]}
+            "provider": params.get("provider", self.provider), # Log provider used
+            "params_other": {k: v for k, v in (params or {}).items() if k not in ["model", "temperature", "provider"]}
         }
 
         if template_name:

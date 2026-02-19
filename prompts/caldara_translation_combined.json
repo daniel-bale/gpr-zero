@@ -7,6 +7,9 @@
     "source": "Caldara & Iacoviello (2022)",
     "target_language": "Chinese (Traditional)"
   },
+  "api_config": { 
+    "temperature": 0.2 
+  },
   "prompt": {
     "input": [
       {

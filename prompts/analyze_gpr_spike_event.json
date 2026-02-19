@@ -1,0 +1,48 @@
+{
+  "metadata": {
+    "name": "analyze_gpr_spike_event",
+    "description": "Analyzes a GPR spike event based on news articles, requesting JSON output adhering to a specific schema. Responses must be in English.",
+    "version": "1.6"
+  },
+  "api_config": {
+    "temperature": 0.2
+  },
+  "prompt": {
+    "input": [
+      {
+        "role": "system",
+        "content": "You are an expert geopolitical analyst tasked with identifying the cause of GPR index spikes based on news articles. Analyze the collection of news articles holistically to understand the broader geopolitical context and identify the primary driving forces behind the spike. Provide concise and accurate summaries in the requested JSON format, adhering to the provided schema. All responses, including short and long answers, must be in English."
+      },
+      {
+        "role": "user",
+        "content": "A GPR (Geopolitical Risk) index showed a significant spike between {start_date} and {end_date}, peaking on {peak_date}.\n\nThe following news articles were published during this period:\n\n--- BEGIN NEWS ARTICLES ---\n{news_articles_summary}\n--- END NEWS ARTICLES ---\n\nBased on these articles, please analyze the spike event by considering the broader geopolitical context across all articles:\n\n1. Short Answer (max 3 terms, English only): What was the primary geopolitical event, tension, or development that likely caused this GPR spike? Look across all articles to identify the main theme rather than focusing on a single article. Focus on the overarching pattern or strategic dynamic.\n\n   EXAMPLES of good short answers:\n   - \"Cross-Strait diplomatic isolation\" (for Taiwan diplomatic setbacks)\n   - \"Cross-Strait unification pressure\" (for Beijing political pressure)\n   - \"Information warfare & military escalation\" (for hybrid threats)\n   - \"Diplomatic isolation cascade\" (for multiple diplomatic breaks)\n   - \"Internal political polarization\" (for domestic political crises)\n   - \"US-China strategic competition\" (for great power dynamics)\n   - \"Multi-front pressure campaign\" (for coordinated multiple pressures)\n   - \"Dispersed multi-domain threats\" (for fragmented but persistent threats)\n\n2. Long Answer (2-3 sentences, English only): Synthesize the key information from ALL the news articles to explain this GPR spike. Focus on the overarching geopolitical developments and their implications as reported across the collection of articles. Consider regional dynamics, international relations, and broader strategic implications rather than isolated incidents. Connect the events to demonstrate the systematic nature or strategic context.\n\n   EXAMPLES of good long answers:\n   - \"Taiwan blocked from WHO observer status and Burkina Faso diplomatic break, demonstrating China's systematic campaign to isolate Taiwan internationally while testing democratic resilience.\"\n   - \"40th Anniversary of 'Message to Taiwan Compatriots' coincided with Taiwan's presidential election cycle, as Beijing intensified political warfare while domestic electoral dynamics created policy uncertainty.\"\n   - \"Solomon Islands and Kiribati severed diplomatic ties during Taiwan's presidential election period, reducing allies to historic low and demonstrating Beijing's electoral interference strategy.\"\n   - \"Lin Bingshu domestic scandal and cyber army controversies weakened government credibility while US announced Beijing Olympics diplomatic boycott and Nicaragua broke diplomatic ties with Taiwan.\"\n\n3. Keywords (comma-separated list, Chinese only): Extract 3-5 key terms or phrases from the articles that are most relevant to this GPR spike event. These should be specific entities, events, or concepts that appear across multiple articles or represent the core geopolitical themes. Include both Chinese and English terms where appropriate.\n\n   EXAMPLES of good keywords:\n   - \"WHO觀察員地位,布吉納法索斷交,中國孤立台灣,民主韌性,國際參與\"\n   - \"告台灣同胞書40週年,總統大選,政治作戰,政策不確定性,選舉週期\"\n   - \"台灣在地協力者,軍機越中線,AIT軍事人員,2020總統大選,資訊戰\"\n\nReturn your answer in JSON format with three keys: \"short_answer\", \"long_answer\", and \"keywords\", strictly following the defined schema and ensuring language follows the schema."
+      }
+    ],
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "gpr_spike_analysis_response",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "short_answer": {
+              "type": "string",
+              "description": "A concise summary in English of the primary geopolitical event or development (max 3 terms)."
+            },
+            "long_answer": {
+              "type": "string",
+              "description": "A 2-3 sentence synthesis in English of all news articles explaining the GPR spike, focusing on broader geopolitical context."
+            },
+            "keywords": {
+              "type": "string",
+              "description": "A comma-separated list of 3-5 key terms or phrases in Chinese that are most relevant to this GPR spike event and represent core themes across the articles."
+            }
+          },
+          "required": ["short_answer", "long_answer", "keywords"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+} 

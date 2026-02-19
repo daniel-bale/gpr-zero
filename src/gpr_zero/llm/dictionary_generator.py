@@ -8,7 +8,7 @@ from datetime import datetime
 import re
 import logging
 
-from src.gpr_zero.llm.prompt_manager import PromptManager
+from gpr_zero.llm.prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
