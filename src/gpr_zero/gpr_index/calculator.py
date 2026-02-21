@@ -1,125 +1,106 @@
-"""Calculator for the Geopolitical Risk (GPR) index based on article counting or shares.
+"""GPR Calculator using binary presence matrices for dictionary-based index construction.
 
-Handles labeling articles based on keywords and category definitions defined in a
-structured dictionary, and provides a flexible query interface for aggregating results.
+Builds binary word-presence matrices from news articles and evaluates
+dictionary coverage by matching word sets and categories at query time.
 """
 
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from functools import reduce
+from operator import and_, or_
+from typing import Literal
 
 import ibis
-import ibis.expr.datatypes as dt
 import ibis.expr.types as ir
-import polars as pl # Use Polars for return type
-
-# Import only necessary ibis functions if needed, e.g. from ibis import _
-from ibis import _
 
 logger = logging.getLogger(__name__)
 
 
-# Renamed from CustomGPRCalculator to GPRCalculator
 class GPRCalculator:
-    """
-    Calculates Geopolitical Risk (GPR) indices using an ibis-based approach.
+    """GPR Calculator using binary word-presence matrices.
 
-    Handles labeling articles based on keywords and category definitions,
-    and provides a flexible query interface for aggregating results either as
-    raw counts or as shares of total articles within a group.
+    Workflow:
+    1. Load dictionaries and collect all unique words
+    2. Build binary indicators for each word in articles (``prepare_binary_matrix``)
+    3. Match word sets and categories at query time (``query``)
     """
-    def __init__(self, dictionary_path: str):
+
+    def __init__(self, dictionary_paths: list[str]):
+        """Initialize with multiple dictionary paths to collect all words."""
+        self.dictionary_paths = dictionary_paths
+        self.all_words: set[str] = set()
+        self.dictionaries: dict[str, dict] = {}
+        self.labeled_articles_table: ir.Table | None = None
+        self.word_column_mapping: dict[str, str] = {}
+        self._load_all_dictionaries()
+
+    def _load_all_dictionaries(self):
+        """Load all dictionaries and collect unique words."""
+        for dict_path in self.dictionary_paths:
+            dict_name = Path(dict_path).stem
+
+            try:
+                with open(dict_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if (
+                    not isinstance(data, dict)
+                    or "word_sets" not in data
+                    or "categories" not in data
+                ):
+                    logger.warning(f"Invalid dictionary format: {dict_path}")
+                    continue
+
+                self.dictionaries[dict_name] = data
+
+                # Collect all words from this dictionary
+                for word_set in data["word_sets"].values():
+                    self.all_words.update(word_set)
+
+                logger.info(
+                    f"Loaded dictionary {dict_name} with {len(data['word_sets'])} word sets"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to load dictionary {dict_path}: {e}")
+                continue
+
+        if not self.dictionaries:
+            raise ValueError(
+                "No valid dictionaries were loaded. Check that dictionary_paths "
+                "are correct and each file contains 'word_sets' and 'categories' keys."
+            )
+
+        logger.info(
+            f"Collected {len(self.all_words)} unique words from {len(self.dictionaries)} dictionaries"
+        )
+
+    def _get_table_name(self) -> str:
+        """Generate table name for the binary matrix."""
+        return "gpr_binary_matrix_all_words"
+
+    def prepare_binary_matrix(
+        self,
+        articles_table: ir.Table,
+        materialize: bool = False,
+        force_recalculate: bool = False,
+        overwrite: bool = False,
+    ) -> ir.Table:
         """
-        Initializes the calculator by loading the GPR dictionary.
+        Prepare articles table with binary presence indicators for all words.
 
         Args:
-            dictionary_path: Path to the JSON GPR dictionary file.
-                             Expected format: {"word_sets": {...}, "categories": {...}}
-        """
-        self.dictionary_path = dictionary_path
-        self.word_sets: Dict[str, List[str]] = {}
-        self.category_definitions: Dict[str, str] = {}
-        self._load_structured_dictionary(dictionary_path)
-        self.labeled_articles_table: Optional[ir.Table] = None # Keep ibis.Table type hint consistent
-        logger.info(f"GPRCalculator initialized with dictionary: {dictionary_path}")
-        logger.info(f"Found {len(self.word_sets)} word sets and {len(self.category_definitions)} category definitions.")
-
-    def _load_structured_dictionary(self, dictionary_path: str):
-        """Loads the structured GPR dictionary (word_sets and categories)."""
-        path = Path(dictionary_path)
-        if not path.exists():
-            logger.error(f"GPR dictionary file not found: {dictionary_path}")
-            raise FileNotFoundError(f"GPR dictionary file not found: {dictionary_path}")
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if not isinstance(data, dict) or "word_sets" not in data or "categories" not in data:
-                raise ValueError("Dictionary must be a JSON object with 'word_sets' and 'categories' keys.")
-
-            self.word_sets = data["word_sets"]
-            self.category_definitions = data["categories"]
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from {dictionary_path}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error loading GPR dictionary {dictionary_path}: {e}")
-            raise
-
-    def _build_regex_pattern(self, word_list: List[str]) -> str:
-        """Builds a case-insensitive regex pattern for a list of words."""
-        if not word_list:
-            return r"a^" # Regex that never matches
-        # Ensure words are treated literally, handle potential regex special chars within words
-        escaped_words = [re.escape(word) for word in word_list if word]
-        if not escaped_words:
-            return r"a^"
-        # Case-insensitive multi-word pattern using ibis/SQL compatible regex features
-        return f"(?i)({'|'.join(escaped_words)})"
-
-    def _get_labeled_table_name(self) -> str:
-        """Generates a sanitized table name from the dictionary path."""
-        dict_name = Path(self.dictionary_path).stem
-        # Sanitize the name to be a valid SQL identifier (replace non-word chars with _)
-        sanitized_name = re.sub(r'\W', '_', dict_name)
-        return f"gpr_labeled_{sanitized_name}"
-
-    def prepare(self,
-                articles_table: ir.Table,
-                materialize: bool = False,
-                force_recalculate: bool = False,
-                overwrite: bool = False) -> ir.Table:
-        """
-        Labels the input ibis table with GPR categories based on content and metadata.
-
-        This version adds options to materialize the prepared table in the database
-        for performance and reuse, and to force recalculation if needed.
-
-        Args:
-            articles_table: An ibis table containing article data. Must include
-                            'content', 'source_file', 'category', and 'date' columns.
-            materialize: If True, the labeled table will be saved as a new table
-                         in the database. The table name is derived from the
-                         GPR dictionary filename. Defaults to False.
-            force_recalculate: If True, forces recalculation even if a materialized
-                               table exists. Defaults to False.
-            overwrite: If True, allows overwriting an existing materialized table.
-                       Used in conjunction with `materialize=True`. If False,
-                       an error will be raised on attempting to overwrite.
-                       Defaults to False.
+            articles_table: Input ibis table with articles
+            materialize: Whether to materialize the result table
+            force_recalculate: Force recalculation even if materialized exists
+            overwrite: Allow overwriting existing materialized table
 
         Returns:
-            An ibis table expression with added boolean columns for each word set
-            (has_SETNAME), each category (is_CATEGORYNAME), and an overall match
-            indicator (matches_any_category). If `materialize` is True, this
-            will be a reference to the newly created/loaded table in the database.
+            Ibis table with binary indicators for all words
         """
         if materialize:
-            table_name = self._get_labeled_table_name()
+            table_name = self._get_table_name()
             try:
                 con = articles_table._find_backend()
                 table_exists = table_name in con.list_tables()
@@ -127,292 +108,296 @@ class GPRCalculator:
                 if table_exists and not force_recalculate:
                     logger.info(f"Loading existing materialized table: '{table_name}'")
                     self.labeled_articles_table = con.table(table_name)
+                    # Build word_column_mapping to match the cached table's column indices
+                    self.word_column_mapping = {}  # TODO: add type hint
+                    sorted_words = sorted(self.all_words)
+                    for i, word in enumerate(sorted_words):
+                        col_name = f"contains_word_{i:04d}"
+                        self.word_column_mapping[word] = col_name
+                    logger.info(
+                        f"Rebuilt word_column_mapping with {len(self.word_column_mapping)} entries"
+                    )
                     return self.labeled_articles_table
 
                 if table_exists and force_recalculate:
                     if overwrite:
-                        logger.info(f"'{table_name}' exists but force_recalculate is True. It will be overwritten.")
+                        logger.info(
+                            f"'{table_name}' exists but force_recalculate is True. It will be overwritten."
+                        )
                     else:
-                        logger.warning(f"'{table_name}' exists and force_recalculate is True, but overwrite is False. The result will be calculated but not materialized to avoid an error.")
+                        logger.warning(
+                            f"'{table_name}' exists and force_recalculate is True, but overwrite is False."
+                        )
 
             except Exception as e:
-                logger.warning(f"Could not check for materialized table. Proceeding with in-memory calculation. Error: {e}")
-                materialize = False # Fallback to not materializing if backend check fails
+                logger.warning(
+                    f"Could not check for materialized table. Proceeding with in-memory calculation. Error: {e}"
+                )
+                materialize = False
 
-        logger.info("Preparing article table for GPR calculation...")
-        required_columns = ['content', 'source_file', 'category', 'date']
-        if not all(col in articles_table.columns for col in required_columns):
-             missing = [col for col in required_columns if col not in articles_table.columns]
-             raise ValueError(f"Input table must contain required columns. Missing: {missing}")
-
-        # Ensure date column is timestamp for potential truncation
-        col_type = articles_table['date'].type()
-        if not isinstance(col_type, (dt.Date, dt.Timestamp)):
-             logger.warning(f"Casting 'date' column (type: {col_type}) to timestamp for compatibility.")
-             articles_table = articles_table.mutate(date=articles_table['date'].cast('timestamp'))
-
-        # Add necessary columns using mutate
-        labeled_table = articles_table.mutate(
-            content_lower=_.content.lower(),
-            is_rtf=_.source_file.startswith('LT-')
+        logger.info(
+            f"Building binary presence matrix for {len(self.all_words)} words..."
         )
 
-        # 1. Add boolean columns for each word set
-        word_set_columns = {}
-        for set_name, words in self.word_sets.items():
-            col_name = f"has_{set_name}"
-            pattern = self._build_regex_pattern(words)
-            word_set_columns[col_name] = labeled_table.content_lower.re_search(pattern).fill_null(False)
-            logger.debug(f"Adding column '{col_name}' for word set '{set_name}'")
+        # Check required columns
+        required_columns = ["content", "source_warc_file", "warc_date"]
+        if not all(col in articles_table.columns for col in required_columns):
+            missing = [
+                col for col in required_columns if col not in articles_table.columns
+            ]
+            raise ValueError(
+                f"Input table must contain required columns. Missing: {missing}"
+            )
 
-        labeled_table = labeled_table.mutate(**word_set_columns)
+        # Create binary columns for all words in one mutate call
+        word_columns = {}
+        self.word_column_mapping = {}
 
-        # 2. Add boolean columns for each category
-        category_columns = {}
-        all_category_match_expressions = []
+        # Sort words for consistent indexing across runs
+        sorted_words = sorted(self.all_words)
 
-        for category_name, query_string in self.category_definitions.items():
-            col_name = f"is_{category_name}"
-            
-            # Revised parsing for category definitions to handle " AND " and then "N/"
-            # Example query_string: "word_set_A AND word_set_B"
-            # Or, if ProQuest was mixed (though not current use case): "word_set_A N/2 AND word_set_B"
-            
-            # Split by " AND " first
-            components = [comp.strip() for comp in query_string.split(" AND ")]
-            
-            # Then, for each component, handle potential "N/" (ProQuest-like syntax)
-            # and strip whitespace to get the actual word set name.
-            # This also handles the case where the original category was just "+" separated,
-            # assuming those are now represented as single components after an " AND " split
-            # or if " AND " was not present at all.
-            required_list_names = []
-            for component in components:
-                # If "+" is still present within a component (e.g. from an older format not yet updated),
-                # split by "+" as a fallback for that component.
-                # This makes it robust to "set_A + set_B AND set_C" if such a mixed case arises,
-                # though ideally dictionaries should consistently use "AND".
-                sub_components = [name.strip() for name in component.split("+")]
-                for sub_comp_name in sub_components:
-                    # Handle N/ operator part for each sub-component
-                    actual_list_name = sub_comp_name.split("N/")[0].strip()
-                    if actual_list_name: # Ensure not empty string
-                        required_list_names.append(actual_list_name)
-            
-            if not required_list_names:
-                logger.warning(f"No valid word set names found in query_string: '{query_string}' for category '{category_name}'. Skipping.")
-                category_columns[col_name] = ibis.literal(False)
-                all_category_match_expressions.append(ibis.literal(False))
-                continue
+        for i, word in enumerate(sorted_words):
+            # Create column name using index to avoid issues with Chinese characters
+            col_name = f"contains_word_{i:04d}"
+            word_columns[col_name] = articles_table.content.contains(word)
+            self.word_column_mapping[word] = col_name
 
-            content_match_expr = None
-            valid_definition = True
-            for list_name in required_list_names:
-                has_col_name = f"has_{list_name}"
-                if has_col_name not in labeled_table.columns:
-                    logger.warning(f"Word set column '{has_col_name}' needed for category '{category_name}' not found. Skipping category.")
-                    valid_definition = False
-                    break
-                current_expr = getattr(labeled_table, has_col_name)
-                if content_match_expr is None:
-                    content_match_expr = current_expr
-                else:
-                    # Use boolean AND for joint occurrence
-                    content_match_expr &= current_expr
+        # Add all word columns at once
+        labeled_table = articles_table.mutate(**word_columns)
 
-            if not valid_definition or content_match_expr is None:
-                 logger.warning(f"Could not build content match expression for category '{category_name}'. Assigning False.")
-                 category_expr = ibis.literal(False) # Assign False if definition is invalid
-            else:
-                # Final expression considers RTF pre-assigned category
-                category_expr = ibis.cases(
-                    (labeled_table.is_rtf, labeled_table.category == category_name),
-                    else_=content_match_expr # Use else_ keyword
-                ).fill_null(False) # Use fill_null
-
-            category_columns[col_name] = category_expr
-            all_category_match_expressions.append(category_expr)
-            logger.debug(f"Adding column '{col_name}' for category '{category_name}'")
-
-        labeled_table = labeled_table.mutate(**category_columns)
-
-        # 3. Add 'matches_any_category' column
-        if not all_category_match_expressions:
-            logger.warning("No valid category expressions generated. 'matches_any_category' will be False.")
-            matches_any_category_expr = ibis.literal(False)
-        else:
-            # Use boolean OR to combine individual category matches
-            matches_any_category_expr = all_category_match_expressions[0]
-            for expr in all_category_match_expressions[1:]:
-                matches_any_category_expr |= expr
-            # Ensure final boolean result
-            matches_any_category_expr = matches_any_category_expr.fill_null(False)
-
-
-        labeled_table = labeled_table.mutate(matches_any_category=matches_any_category_expr)
-
+        # Materialize if requested
         if materialize:
-            table_name = self._get_labeled_table_name()
-            logger.info(f"Attempting to materialize labeled table as '{table_name}' (overwrite={overwrite})...")
+            table_name = self._get_table_name()
+            logger.info(
+                f"Materializing table as '{table_name}' (overwrite={overwrite})..."
+            )
             try:
                 con = articles_table._find_backend()
-                # Use overwrite=True. It handles creation and replacement.
                 con.create_table(table_name, labeled_table, overwrite=overwrite)
                 self.labeled_articles_table = con.table(table_name)
-                logger.info(f"Successfully materialized and loaded table '{table_name}'.")
+                logger.info(f"Successfully materialized table '{table_name}'.")
             except Exception as e:
-                logger.error(f"Failed to materialize table '{table_name}'. Returning in-memory expression. Error: {e}")
-                self.labeled_articles_table = labeled_table # Fallback
+                logger.error(
+                    f"Failed to materialize table '{table_name}'. Returning in-memory expression. Error: {e}"
+                )
+                self.labeled_articles_table = labeled_table
         else:
             self.labeled_articles_table = labeled_table
 
-        logger.info(f"Article table preparation complete. Labeled table schema: {list(self.labeled_articles_table.columns)}")
+        logger.info(
+            f"Binary matrix preparation complete. Table has {len(labeled_table.columns)} columns"
+        )
+        logger.info(f"Word columns: {len(self.word_column_mapping)}")
+
         return self.labeled_articles_table
 
-    def query(self,
-              group_by_cols: List[str],
-              time_bucket: Optional[str] = None,
-              time_col: str = 'date',
-              calculate_share: bool = False) -> pl.DataFrame:
+    # TODO: refactor query() — extract time bucketing, word-set expression building,
+    # category expression building, aggregation construction, and query execution
+    # into separate private methods (currently ~200 lines, target <50 each).
+    def query(
+        self,
+        dictionary_name: str,
+        group_by_cols: list[str],
+        time_bucket: str | None = None,
+        time_col: str = "warc_date",
+    ):
         """
-        Queries the prepared GPR data, aggregating results by specified groups and time buckets.
-
-        Can return either raw counts or shares (proportions) of articles.
+        Query GPR data for a specific dictionary, dynamically building word sets and categories.
 
         Args:
-            group_by_cols: List of column names to group by (e.g., ['date'], ['date', 'newspaper']).
-                           Must include `time_col` if `time_bucket` is used.
-            time_bucket: Optional time unit for bucketing (e.g., 'W', 'M', 'Y', 'week', 'month', 'year').
-                         Requires `time_col` to be a date/timestamp column.
-            time_col: The name of the date/time column used for bucketing (default: 'date').
-            calculate_share: If True, calculate the share of articles matching each category
-                             (count / total articles in group). Defaults to False (raw counts).
+            dictionary_name: Name of dictionary to use for word sets and categories
+            group_by_cols: List of column names to group by
+            time_bucket: Optional time unit for bucketing ('W', 'M', 'Y', etc.)
+            time_col: The name of the date/time column used for bucketing
 
         Returns:
-            A Polars DataFrame with aggregated GPR results.
-            If `calculate_share` is False: columns 'overall_index', 'CATEGORYNAME_count'.
-            If `calculate_share` is True: columns 'overall_share', 'CATEGORYNAME_share', 'total_articles_in_group'.
+            Polars DataFrame with aggregated GPR results (wide format)
         """
         if self.labeled_articles_table is None:
-            raise RuntimeError("The 'prepare' method must be called before 'query'.")
+            raise RuntimeError("Must call prepare_binary_matrix() first")
+
+        if dictionary_name not in self.dictionaries:
+            raise ValueError(f"Dictionary '{dictionary_name}' not found")
+
+        dictionary = self.dictionaries[dictionary_name]
+        word_sets = dictionary["word_sets"]
+        categories = dictionary["categories"]
 
         query_table = self.labeled_articles_table
-        final_group_by_cols = list(group_by_cols) # Make a copy
+        final_group_by_cols = list(group_by_cols)
 
-        query_type = "shares" if calculate_share else "counts"
-        logger.info(f"Querying GPR data ({query_type}): Group by {group_by_cols}, Time bucket: {time_bucket} on '{time_col}'")
+        logger.info(
+            f"Querying with dictionary '{dictionary_name}': {len(word_sets)} word sets, {len(categories)} categories"
+        )
 
-        # --- Time Bucketing Logic (remains the same) ---
-        bucketed_col_name = time_col # Default if no bucketing
+        # Time bucketing logic
         if time_bucket:
             if time_col not in query_table.columns:
-                raise ValueError(f"Time column '{time_col}' not found in prepared table.")
-            if time_col not in group_by_cols:
-                 logger.warning(f"Time column '{time_col}' added implicitly to grouping for bucketing.")
-                 final_group_by_cols.append(time_col)
-
-            time_col_expr = query_table[time_col]
-            if not isinstance(time_col_expr.type(), (dt.Date, dt.Timestamp)):
-                 raise TypeError(f"Time column '{time_col}' (type: {time_col_expr.type()}) must be a Date or Timestamp type for bucketing.")
+                raise ValueError(
+                    f"Time column '{time_col}' not found in prepared table."
+                )
 
             bucketed_col_name = f"{time_col}_bucketed"
+            # TODO: fix the type hint
             ibis_time_unit = time_bucket.lower()
-            if ibis_time_unit in ['w', 'week']: ibis_time_unit = 'W' # DuckDB uses 'W' for ISO week
-            elif ibis_time_unit in ['m', 'month']: ibis_time_unit = 'month'
-            elif ibis_time_unit in ['y', 'year']: ibis_time_unit = 'year'
-            else: logger.warning(f"Unknown time bucket unit: {time_bucket}. Using as is.")
+            if ibis_time_unit in ["w", "week"]:
+                ibis_time_unit = "W"
+            elif ibis_time_unit in ["m", "month"]:
+                ibis_time_unit = "M"
+            elif ibis_time_unit in ["y", "year"]:
+                ibis_time_unit = "Y"
 
-            logger.info(f"Applying time bucketing: '{time_col}' truncated to '{ibis_time_unit}' as '{bucketed_col_name}'")
-            query_table = query_table.mutate(
-                **{bucketed_col_name: query_table[time_col].truncate(ibis_time_unit)}
+            logger.info(
+                f"Applying time bucketing: '{time_col}' truncated to '{ibis_time_unit}' as '{bucketed_col_name}'"
             )
-            final_group_by_cols = [bucketed_col_name if col == time_col else col for col in final_group_by_cols]
-            logger.info(f"Updated group_by columns for bucketing: {final_group_by_cols}")
-        # --- End Time Bucketing ---
+            # Convert string date to date type if needed, then truncate
+            query_table = query_table.mutate(
+                **{
+                    bucketed_col_name: query_table[time_col]
+                    .cast(
+                        "date"
+                    )  # TODO: time_cols should be make sure to be in date format from table creation
+                    .truncate(ibis_time_unit)
+                }
+            )
 
-        # --- Aggregation Definitions ---
+            # Replace time_col with bucketed_col_name in final_group_by_cols, or add if not present
+            if time_col in final_group_by_cols:
+                final_group_by_cols = [
+                    bucketed_col_name if col == time_col else col
+                    for col in final_group_by_cols
+                ]
+            else:
+                # Add bucketed time column if time_bucket is specified but time_col not in group_by_cols
+                final_group_by_cols.append(bucketed_col_name)
+                logger.info(
+                    f"Added '{bucketed_col_name}' to grouping for time bucketing"
+                )
+
+            logger.info(
+                f"Updated group_by columns for bucketing: {final_group_by_cols}"
+            )
+
+        # Build word set expressions using reduce
+        word_set_expressions = {}
+        for set_name, words in word_sets.items():
+            # Get columns for words that exist in this word set
+            relevant_word_columns = [
+                self.word_column_mapping.get(word)
+                for word in words
+                if word in self.word_column_mapping
+            ]
+
+            if relevant_word_columns:
+                # Use reduce with OR operator: any word in the set matches
+                word_columns_exprs = [query_table[col] for col in relevant_word_columns]
+                word_set_expr = reduce(or_, word_columns_exprs)
+                word_set_expressions[f"has_{set_name}"] = word_set_expr
+            else:
+                word_set_expressions[f"has_{set_name}"] = ibis.literal(False)
+
+        # Add word set columns to query table
+        query_table = query_table.mutate(**word_set_expressions)
+
+        # Build category expressions using reduce
+        category_expressions = {}
+        all_category_match_expressions = []
+
+        for category_name, query_string in categories.items():
+            # Parse category definition (word_set_A AND word_set_B)
+            # TODO: This parsing is so bad, need to implement a proper parser for more complex expressions in the future
+            components = [comp.strip() for comp in query_string.split(" AND ")]
+            required_list_names = []
+            for component in components:
+                sub_components = [name.strip() for name in component.split("+")]
+                for sub_comp_name in sub_components:
+                    actual_list_name = sub_comp_name.split("N/")[0].strip()
+                    if actual_list_name:
+                        required_list_names.append(actual_list_name)
+
+            if not required_list_names:
+                logger.warning(
+                    f"No valid word set names found for category '{category_name}'. Skipping."
+                )
+                category_expr = ibis.literal(False)
+            else:
+                # Get word set expressions needed for this category
+                has_columns = [
+                    query_table[f"has_{list_name}"] for list_name in required_list_names
+                ]
+                # Use reduce with AND operator: all word sets must match
+                category_expr = reduce(and_, has_columns, ibis.literal(True)).fill_null(
+                    False
+                )
+
+            category_expressions[f"is_{category_name}"] = category_expr
+            all_category_match_expressions.append(category_expr)
+
+        # Add category columns to query table
+        query_table = query_table.mutate(**category_expressions)
+
+        # Add overall match indicator
+        if all_category_match_expressions:
+            matches_any_category_expr = reduce(
+                or_, all_category_match_expressions
+            ).fill_null(False)
+        else:
+            matches_any_category_expr = ibis.literal(False)
+
+        query_table = query_table.mutate(matches_any_category=matches_any_category_expr)
+
+        # Build aggregations - always compute both counts and shares
         aggregations = {}
-        count_suffix = "_count"
-        share_suffix = "_share"
 
-        # Define count aggregations first
-        overall_count_agg = query_table.matches_any_category.sum().cast('int64') # Ensure integer counts
+        # Total article count
+        total_count_agg = query_table.count().name("total_articles")
+        aggregations["total_articles"] = total_count_agg
+        total_count_safe = (total_count_agg + 1e-9).cast("float64")
+
+        # Overall GPR index
+        overall_count_agg = query_table.matches_any_category.sum().cast("int64")
+        aggregations["total_gpr_count"] = overall_count_agg
+        aggregations["total_gpr_share"] = overall_count_agg / total_count_safe
+
+        # Category counts and shares
         category_count_aggs = {}
-        for category_name in self.category_definitions.keys():
+        category_share_aggs = {}
+        for category_name in categories.keys():
             is_col_name = f"is_{category_name}"
             if is_col_name in query_table.columns:
-                category_count_aggs[f"{category_name}{count_suffix}"] = getattr(query_table, is_col_name).sum().cast('int64')
-            else:
-                 logger.warning(f"Category column '{is_col_name}' not found during aggregation. Skipping count.")
+                count_agg = getattr(query_table, is_col_name).sum().cast("int64")
+                category_count_aggs[f"{category_name}_count"] = count_agg
+                category_share_aggs[f"{category_name}_share"] = (
+                    count_agg / total_count_safe
+                )
 
-        # Add unique date count when time bucketing is used
-        if time_bucket:
-            unique_date_count_agg = query_table[time_col].nunique().name("unique_dates_in_bucket")
-            aggregations["unique_dates_in_bucket"] = unique_date_count_agg
+        # Add all counts and shares
+        aggregations.update(category_count_aggs)
+        aggregations.update(category_share_aggs)
 
-        if not calculate_share:
-            # Aggregate counts
-            aggregations["overall_index"] = overall_count_agg
-            aggregations.update(category_count_aggs)
-        else:
-            # Aggregate counts and total, then calculate shares
-            total_count_agg = query_table.count().name("total_articles_in_group")
-            # Add a small epsilon to prevent division by zero
-            total_count_safe = (total_count_agg + 1e-9).cast('float64')
-
-            aggregations["total_articles_in_group"] = total_count_agg # Include total count in output
-            aggregations[f"overall{share_suffix}"] = (overall_count_agg / total_count_safe)
-
-            for name, count_agg in category_count_aggs.items():
-                 base_name = name.replace(count_suffix, "")
-                 aggregations[f"{base_name}{share_suffix}"] = (count_agg / total_count_safe)
-        # --- End Aggregation Definitions ---
-
-        # --- Perform Grouping and Aggregation ---
+        # Perform aggregation
         if not final_group_by_cols:
-             logger.info("No grouping columns specified. Aggregating over the entire table.")
-             result_expr = query_table.aggregate(**aggregations)
-        else:
-            logger.info(f"Grouping by: {final_group_by_cols}")
-            grouped_table = query_table.group_by(final_group_by_cols)
-            result_expr = grouped_table.aggregate(**aggregations)
+            # TODO: raise earlier
+            raise ValueError(
+                "final_group_by_cols cannot be empty. Must specify at least time grouping or other grouping columns."
+            )
 
-        # Ensure sorting by group keys for predictable output
-        if final_group_by_cols:
-             # Use a list of ibis.asc() expressions for sorting
-             sort_expressions = [ibis.asc(col) for col in final_group_by_cols]
-             result_expr = result_expr.order_by(sort_expressions)
-        # --- End Grouping and Aggregation ---
+        grouped_table = query_table.group_by(final_group_by_cols)
+        result_expr = grouped_table.aggregate(**aggregations)
+
+        # Sort by group keys
+        sort_expressions = [ibis.asc(col) for col in final_group_by_cols]
+        result_expr = result_expr.order_by(sort_expressions)
 
         # Execute query
         logger.info("Executing aggregation query...")
         try:
             result_df = result_expr.to_polars()
-            logger.info(f"Query successful. Result shape: {result_df.shape}, Columns: {result_df.columns}")
-            logger.debug(f"Result head:\n{result_df.head().to_pandas()}") # Log pandas for readability
+            logger.info(
+                f"Query successful. Result shape: {result_df.shape}, Columns: {result_df.columns}"
+            )
             return result_df
+
         except Exception as e:
             logger.error(f"Error executing ibis query: {e}")
-            # Consider logging the compiled SQL query for debugging
-            # try:
-            #     logger.error(f"Compiled SQL:\n{ibis.to_sql(result_expr)}")
-            # except Exception as sql_e:
-            #     logger.error(f"Could not compile query to SQL: {sql_e}")
             raise
-
-# Example Usage (for documentation/testing - not run directly here)
-# if __name__ == '__main__':
-#     logging.basicConfig(level=logging.INFO)
-#     # Example assuming a duckdb database exists
-#     db_path = "path/to/your/news.duckdb"
-#     dict_path = "path/to/your/gpr_dict.json"
-#     conn = ibis.connect(f"duckdb:///{db_path}")
-#     articles = conn.table("articles")
-#     calculator = GPRCalculator(dict_path)
-#     calculator.prepare(articles)
-#     daily_counts = calculator.query(group_by_cols=['date'])
-#     print("\nDaily Counts:")
-#     print(daily_counts.head())
-#     weekly_shares = calculator.query(group_by_cols=['date', 'newspaper_en'], time_bucket='W', calculate_share=True)
-#     print("\nWeekly Shares by Newspaper:")
-#     print(weekly_shares.head())

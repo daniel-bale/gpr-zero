@@ -15,7 +15,7 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).parent.parent))
 
 import ibis
-from gpr_zero.gpr_index.calculator_binary_matrix import GPRCalculatorBinaryMatrix
+from gpr_zero.gpr_index.calculator import GPRCalculator
 
 # Configure logging
 logging.basicConfig(
@@ -61,7 +61,7 @@ def main():
     
     # Initialize the binary matrix calculator with all dictionaries
     logger.info("Initializing GPR calculator with all dictionaries...")
-    calculator = GPRCalculatorBinaryMatrix([str(f) for f in dict_files])
+    calculator = GPRCalculator([str(f) for f in dict_files])
     
     # Prepare the binary matrix (materialize for performance)
     logger.info("Preparing binary matrix for all words across all dictionaries...")

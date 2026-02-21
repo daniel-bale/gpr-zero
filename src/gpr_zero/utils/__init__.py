@@ -1,5 +1,1 @@
-"""Utility functions and classes for the GPR-Zero project."""
-
-from gpr_zero.utils.dictionary_utils import transform_dict_to_search_strings
-
-__all__ = ["transform_dict_to_search_strings"]
+from gpr_zero.utils.font_setup import ensure_cjk_font_setup as ensure_cjk_font_setup

@@ -1,1 +1,1 @@
-"""LLM interaction module for GPR dictionary generation and classification."""
+from gpr_zero.llm.prompt_manager import PromptManager as PromptManager

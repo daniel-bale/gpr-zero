@@ -21,7 +21,7 @@ class PromptManager:
         log_dir: str = "logs/llm",
         temperature: float | None = None,
         config_file_path: str | Path = "llm_config.yaml",
-        provider: str | None = None
+        provider: str | None = None,
     ):
         """Initialize the prompt manager.
 
@@ -42,56 +42,83 @@ class PromptManager:
         # Load configuration from YAML
         self.config_data = None
         try:
-            with open(config_file_path, 'r', encoding='utf-8') as f_config:
+            with open(config_file_path, "r", encoding="utf-8") as f_config:
                 self.config_data = yaml.safe_load(f_config)
         except FileNotFoundError:
-            self.logger.warning(f"LLM config file not found at {config_file_path}. Using hardcoded defaults or __init__ args.")
+            self.logger.warning(
+                f"LLM config file not found at {config_file_path}. Using hardcoded defaults or __init__ args."
+            )
         except Exception as e:
-            self.logger.error(f"Error loading LLM config from {config_file_path}: {e}. Using hardcoded defaults or __init__ args.")
+            self.logger.error(
+                f"Error loading LLM config from {config_file_path}: {e}. Using hardcoded defaults or __init__ args."
+            )
 
         # Set provider from config or fallback/override
         if self.config_data:
-            default_provider_from_config = self.config_data.get("providers", {}).get("default", "openai")
-            default_model_from_config = self.config_data.get("models", {}).get("default", "gpt-4")
-            default_temp_from_config = self.config_data.get("task_defaults", {}).get("default_generation", {}).get("temperature", 0.0)
+            default_provider_from_config = self.config_data.get("providers", {}).get(
+                "default", "openai"
+            )
+            default_model_from_config = self.config_data.get("models", {}).get(
+                "default", "gpt-4"
+            )
+            default_temp_from_config = (
+                self.config_data.get("task_defaults", {})
+                .get("default_generation", {})
+                .get("temperature", 0.0)
+            )
         else:
             default_provider_from_config = "openai"  # Hardcoded fallback
             default_model_from_config = "gpt-4"  # Hardcoded fallback
             default_temp_from_config = 0.0  # Hardcoded fallback
 
-        self.provider = provider if provider is not None else default_provider_from_config
-        self.model_name = model_name if model_name is not None else default_model_from_config
-        self.temperature = temperature if temperature is not None else default_temp_from_config
+        self.provider = (
+            provider if provider is not None else default_provider_from_config
+        )
+        self.model_name = (
+            model_name if model_name is not None else default_model_from_config
+        )
+        self.temperature = (
+            temperature if temperature is not None else default_temp_from_config
+        )
 
         # Initialize appropriate client based on provider
-        self.client = None
         if self.provider == "openrouter":
             self._init_openrouter_client()
         else:  # Default to OpenAI
             self._init_openai_client()
 
     def _init_openai_client(self):
-        """Initialize OpenAI client."""
-        if os.environ.get("OPENAI_API_KEY"):
-            self.client = openai.OpenAI(
-                api_key=os.environ.get("OPENAI_API_KEY")
+        """Initialize OpenAI client.
+
+        Raises:
+            EnvironmentError: If OPENAI_API_KEY is not set.
+        """
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "OPENAI_API_KEY not found in environment variables. "
+                "Set it in your .env file or export it."
             )
-            self.logger.info("Initialized OpenAI client")
-        else:
-            self.client = None
-            self.logger.warning("OPENAI_API_KEY not found in environment variables")
+        self.client = openai.OpenAI(api_key=api_key)
+        self.logger.info("Initialized OpenAI client")
 
     def _init_openrouter_client(self):
-        """Initialize OpenRouter client."""
-        if os.environ.get("OPENROUTER_API_KEY"):
-            self.client = openai.OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=os.environ.get("OPENROUTER_API_KEY")
+        """Initialize OpenRouter client.
+
+        Raises:
+            EnvironmentError: If OPENROUTER_API_KEY is not set.
+        """
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "OPENROUTER_API_KEY not found in environment variables. "
+                "Set it in your .env file or export it."
             )
-            self.logger.info("Initialized OpenRouter client")
-        else:
-            self.client = None
-            self.logger.warning("OPENROUTER_API_KEY not found in environment variables")
+        self.client = openai.OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
+        self.logger.info("Initialized OpenRouter client")
 
     def _make_api_call(self, api_params: dict[str, Any]) -> Any:
         """Make API call with appropriate client based on provider."""
@@ -99,38 +126,46 @@ class PromptManager:
 
     def load_prompt_template(self, template_file: str | Path) -> dict[str, Any]:
         """Load a prompt template from file.
-        
+
         Args:
             template_file: Path to the prompt template JSON file.
-            
+
         Returns:
             Prompt template as a dictionary
         """
         prompt_path = Path(template_file)
         try:
-            with open(prompt_path, 'r', encoding='utf-8') as f:
+            with open(prompt_path, "r", encoding="utf-8") as f:
                 loaded_template = json.load(f)
                 # Basic validation for the new structure
-                if "prompt" not in loaded_template or "input" not in loaded_template["prompt"]:
-                    raise ValueError("Template must have 'prompt' with an 'input' list.")
+                if (
+                    "prompt" not in loaded_template
+                    or "input" not in loaded_template["prompt"]
+                ):
+                    raise ValueError(
+                        "Template must have 'prompt' with an 'input' list."
+                    )
                 return loaded_template
         except FileNotFoundError:
             self.logger.error(f"Prompt template file not found at {prompt_path}")
             raise FileNotFoundError(f"Prompt template file not found at {prompt_path}")
         except ValueError as ve:
-            self.logger.error(f"Invalid prompt template structure in {prompt_path}: {ve}")
+            self.logger.error(
+                f"Invalid prompt template structure in {prompt_path}: {ve}"
+            )
             raise
-    
+
     def render_prompt(self, template: str, **kwargs) -> str:
         """Render a prompt template with the given arguments.
-        
+
         Args:
             template: Prompt template string
             **kwargs: Arguments to fill in the template
-            
+
         Returns:
             Rendered prompt
         """
+
         # Use a more flexible formatter that doesn't fail on missing keys
         class SafeFormatter(string.Formatter):
             def get_value(self, key, args, kwargs):
@@ -138,26 +173,26 @@ class PromptManager:
                     return super().get_value(key, args, kwargs)
                 except (KeyError, IndexError):
                     return f"{{{key}}}"
-        
+
         formatter = SafeFormatter()
         return formatter.format(template, **kwargs)
 
     def call_llm_with_prompt_file(
         self,
         prompt_template_file: str | Path,
-        template_args_list: list[dict[str, Any]] | None = None, # Made optional
+        template_args_list: list[dict[str, Any]] | None = None,  # Made optional
         model_override: str | None = None,
-        temperature_override: float | None = None
+        temperature_override: float | None = None,
     ) -> dict[str, Any]:
         """Call LLM using a prompt template loaded from a file.
-        
+
         Args:
             prompt_template_file: Full path to the prompt template JSON file.
             template_args_list: Optional list of dictionaries for template rendering.
                                   Only used if prompt's metadata indicates content is a template.
             model_override: Optional override for the model.
             temperature_override: Optional override for temperature.
-            
+
         Returns:
             The LLM response and metadata
         """
@@ -165,23 +200,27 @@ class PromptManager:
         template_actual_name = Path(prompt_template_file).name
 
         # Check metadata flag for rendering content
-        render_content_as_template = prompt_file_content.get("metadata", {}).get("render_content_as_template", True)
-        
+        render_content_as_template = prompt_file_content.get("metadata", {}).get(
+            "render_content_as_template", True
+        )
+
         # Determine model and temperature using hierarchy:
         # 1. Method overrides
         # 2. Template's api_config (for temperature only)
         # 3. PromptManager instance defaults (from YAML or __init__ overrides)
         template_api_config = prompt_file_content.get("api_config", {})
-        
+
         # Model determination: override -> self.model_name (from config/init)
         model = model_override if model_override is not None else self.model_name
-        
+
         # Temperature determination: override -> template_config -> self.temperature (from config/init)
         if temperature_override is not None:
             temperature = temperature_override
-        elif "temperature" in template_api_config: # Check if template explicitly sets temperature
+        elif (
+            "temperature" in template_api_config
+        ):  # Check if template explicitly sets temperature
             temperature = template_api_config["temperature"]
-        else: # Fallback to PromptManager's default temperature
+        else:  # Fallback to PromptManager's default temperature
             temperature = self.temperature
 
         # Prepare messages by rendering content from template's prompt.input
@@ -194,33 +233,47 @@ class PromptManager:
                         current_args_for_message = {}
                         if template_args_list and i < len(template_args_list):
                             current_args_for_message = template_args_list[i]
-                        rendered_content = self.render_prompt(msg_template["content"], **current_args_for_message)
-                    
-                    rendered_messages.append({"role": msg_template["role"], "content": rendered_content})
+                        rendered_content = self.render_prompt(
+                            msg_template["content"], **current_args_for_message
+                        )
+
+                    rendered_messages.append(
+                        {"role": msg_template["role"], "content": rendered_content}
+                    )
                 else:
-                    self.logger.warning(f"Skipping invalid message template in {template_actual_name}: {msg_template}")
+                    self.logger.warning(
+                        f"Skipping invalid message template in {template_actual_name}: {msg_template}"
+                    )
         else:
-            raise ValueError(f"Prompt template {template_actual_name} is missing 'prompt.input' structure.")
+            raise ValueError(
+                f"Prompt template {template_actual_name} is missing 'prompt.input' structure."
+            )
 
         if not rendered_messages:
-            raise ValueError(f"No valid messages could be rendered from {template_actual_name}.")
+            raise ValueError(
+                f"No valid messages could be rendered from {template_actual_name}."
+            )
 
         # API parameters
         api_params = {
             "model": model,
             "temperature": temperature,
-            "messages": rendered_messages
+            "messages": rendered_messages,
         }
 
         # Check for response formatting (e.g., JSON mode or JSON schema)
-        prompt_text_format_config = prompt_file_content.get("prompt", {}).get("text", {}).get("format", {})
+        prompt_text_format_config = (
+            prompt_file_content.get("prompt", {}).get("text", {}).get("format", {})
+        )
         response_format_type = prompt_text_format_config.get("type")
 
         if response_format_type == "json_schema":
             # Construct the expected structure for json_schema type
             schema_name = prompt_text_format_config.get("name")
             schema_definition = prompt_text_format_config.get("schema")
-            schema_strict = prompt_text_format_config.get("strict", True) # Default to True
+            schema_strict = prompt_text_format_config.get(
+                "strict", True
+            )  # Default to True
 
             if schema_name and schema_definition:
                 api_params["response_format"] = {
@@ -228,8 +281,8 @@ class PromptManager:
                     "json_schema": {
                         "name": schema_name,
                         "strict": schema_strict,
-                        "schema": schema_definition
-                    }
+                        "schema": schema_definition,
+                    },
                 }
             else:
                 self.logger.error(
@@ -239,211 +292,105 @@ class PromptManager:
         elif response_format_type == "json_object":
             # Simple JSON mode
             api_params["response_format"] = {"type": "json_object"}
-        
+
         # Log the request
         # For simplicity in logging, let's take the content of the last message if available.
-        representative_rendered_prompt = rendered_messages[-1]["content"] if rendered_messages else ""
-        
+        representative_rendered_prompt = (
+            rendered_messages[-1]["content"] if rendered_messages else ""
+        )
+
         # template_args_list for logging might be None if not applicable
         request_id = self._log_request(
             prompt=representative_rendered_prompt,
-            system_message=None, 
-            params={"model": model, "temperature": temperature, "provider": self.provider},
+            system_message=None,
+            params={
+                "model": model,
+                "temperature": temperature,
+                "provider": self.provider,
+            },
             template_name=template_actual_name,
-            template_args=template_args_list # Pass original, could be None
+            template_args=template_args_list,  # Pass original, could be None
         )
-        
+
         # Make the API call
-        if self.client:
-            try:
-                response = self._make_api_call(api_params)
-                
-                result_text = response.choices[0].message.content
-                result = {
-                    "text": result_text,
-                    "raw_response": response.model_dump()
-                }
-                
-                # If JSON output was expected via a schema or json_object, try to parse it
-                if response_format_type in ["json_schema", "json_object"]:
-                    try:
-                        result["structured_output"] = json.loads(result_text)
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"LLM response was expected as JSON ({response_format_type}) but failed to parse. Request ID: {request_id}")
-                        # Keep the raw text output
-                            
-            except Exception as e:
-                error_details = str(e)
-                if isinstance(e, openai.APIError) and e.body:
-                    error_details = e.body
-                self.logger.error(f"Error calling LLM API (request {request_id}): {error_details}")
-                result = {
-                    "text": f"Error: {error_details}",
-                    "error": error_details
-                }
-        else:
-            self.logger.warning(f"No {self.provider.upper()} client available, using mock response")
-            result = {
-                "text": f"This is a mock response as no {self.provider.upper()} API key was provided.",
-                "mock": True
-            }
-            
+        try:
+            response = self._make_api_call(api_params)
+
+            result_text = response.choices[0].message.content
+            result = {"text": result_text, "raw_response": response.model_dump()}
+
+            # If JSON output was expected via a schema or json_object, try to parse it
+            if response_format_type in ["json_schema", "json_object"]:
+                try:
+                    result["structured_output"] = json.loads(result_text)
+                except json.JSONDecodeError:
+                    self.logger.warning(
+                        f"LLM response was expected as JSON ({response_format_type}) but failed to parse. Request ID: {request_id}"
+                    )
+
+        except Exception as e:
+            error_details = str(e)
+            if isinstance(e, openai.APIError) and e.body:
+                error_details = e.body
+            self.logger.error(
+                f"Error calling LLM API (request {request_id}): {error_details}"
+            )
+            result = {"text": f"Error: {error_details}", "error": error_details}
+
         self._log_response(request_id, result)
-        
+
         result["metadata"] = {
             "prompt_name": template_actual_name,
             "model": model,
             "temperature": temperature,
             "provider": self.provider,
             "timestamp": datetime.now().isoformat(),
-            "request_id": request_id
-        }
-        
-        return result
-
-    def call_llm(
-        self,
-        prompt: str, # User prompt string
-        system_message: str | None = None,
-        params: dict[str, Any] | None = None, # For model, temperature overrides
-        template_name: str | None = None, # Conceptual name if this prompt is a known type
-        template_args: dict[str, Any] | None = None # For rendering placeholders in prompt/system_message
-    ) -> dict[str, Any]:
-        """Call LLM with the given prompt string and parameters.
-
-        Args:
-            prompt: The user prompt string to send to the LLM (can contain placeholders).
-            system_message: Optional system message (can contain placeholders).
-            params: Additional parameters for the API call (e.g., model, temperature).
-            template_name: Optional conceptual name for this type of prompt.
-            template_args: Optional arguments to fill in placeholders in prompt and system_message.
-
-        Returns:
-            The LLM response, similar structure to call_llm_with_prompt_file.
-        """
-        current_template_args = template_args or {}
-
-        # Determine model and temperature
-        call_params_from_arg = params or {}
-        model = call_params_from_arg.get("model", self.model_name)
-        temperature = call_params_from_arg.get("temperature", self.temperature)
-
-        # Prepare messages
-        messages = []
-        rendered_system_message_content = None
-        if system_message:
-            rendered_system_message_content = self.render_prompt(system_message, **current_template_args)
-            messages.append({"role": "system", "content": rendered_system_message_content})
-        
-        rendered_prompt_content = self.render_prompt(prompt, **current_template_args)
-        messages.append({"role": "user", "content": rendered_prompt_content})
-        
-        # API parameters for the call
-        api_call_params = {
-            "model": model,
-            "temperature": temperature,
-            "messages": messages
-        }
-        # Note: response_format for JSON mode is typically not used for ad-hoc string prompts unless specified via params
-        # if call_params_from_arg.get("response_format_type") == "json_object": 
-        # api_call_params["response_format"] = {"type": "json_object"}
-
-        # Log the request
-        request_id = self._log_request(
-            prompt=rendered_prompt_content, # Representative prompt for logging
-            system_message=rendered_system_message_content, # Log rendered system message if any
-            params={"model": model, "temperature": temperature, "provider": self.provider}, # Actual params used
-            template_name=template_name, # Conceptual template name
-            template_args=current_template_args
-        )
-
-        # Make the API call
-        if self.client:
-            try:
-                response = self._make_api_call(api_call_params)
-                result_text = response.choices[0].message.content
-                result = {
-                    "text": result_text,
-                    "raw_response": response.model_dump()
-                }
-                # No automatic JSON parsing here unless `params` specifically asked for it and it was handled.
-            except Exception as e:
-                error_details = str(e)
-                if isinstance(e, openai.APIError) and e.body:
-                    error_details = e.body
-                self.logger.error(f"Error calling LLM API (request {request_id}): {error_details}")
-                result = {
-                    "text": f"Error: {error_details}",
-                    "error": error_details
-                }
-        else:
-            self.logger.warning(f"No {self.provider.upper()} client available, using mock response (call_llm)")
-            result = {
-                "text": f"This is a mock response as no {self.provider.upper()} API key was provided.",
-                "mock": True
-            }
-
-        self._log_response(request_id, result)
-
-        result["metadata"] = {
-            "prompt_name": template_name if template_name else "ad_hoc_prompt",
-            "model": model,
-            "temperature": temperature,
-            "provider": self.provider,
-            "timestamp": datetime.now().isoformat(),
-            "request_id": request_id
+            "request_id": request_id,
         }
         return result
 
     def _log_request(
         self,
-        prompt: str, 
-        system_message: str | None, 
-        params: dict[str, Any] | None, 
+        prompt: str,
+        system_message: str | None,
+        params: dict[str, Any],
         template_name: str | None = None,
-        template_args: list[dict[str, Any]] | None = None # Changed from dict to list | None
+        template_args: list[dict[str, Any]] | None = None,
     ) -> str:
         """Log an LLM request.
 
         Args:
             prompt: The primary rendered prompt content.
             system_message: The rendered system message, if any.
-            params: Key parameters like model and temperature used for the call.
-            template_name: Optional name of the prompt template used (file or conceptual).
-            template_args: Optional list of arguments used for rendering templates messages.
+            params: Parameters used for the call (model, temperature, provider).
+            template_name: Name of the prompt template file used.
+            template_args: Arguments used for rendering template messages.
 
         Returns:
-            A unique ID for the request
+            A unique ID for the request.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        request_id = f"{timestamp}"
+        request_id = timestamp
 
-        log_data = {
+        log_data: dict[str, Any] = {
             "request_id": request_id,
             "timestamp": timestamp,
-            "model": params.get("model", self.model_name), # Log actual model used
-            "temperature": params.get("temperature", self.temperature), # Log actual temp used
-            "provider": params.get("provider", self.provider), # Log provider used
-            "params_other": {k: v for k, v in (params or {}).items() if k not in ["model", "temperature", "provider"]}
+            "model": params.get("model", self.model_name),
+            "temperature": params.get("temperature", self.temperature),
+            "provider": params.get("provider", self.provider),
+            "rendered_user_prompt": prompt,
         }
 
         if template_name:
             log_data["template_name"] = template_name
-            # Ensure template_args is serializable (it's a list of dicts or None)
-            log_data["template_args"] = template_args if template_args is not None else [] # Log as empty list if None
-            log_data["rendered_user_prompt"] = prompt
-            if system_message:
-                 log_data["rendered_system_message"] = system_message
-        else: # Ad-hoc prompt from call_llm without a template_name
-            log_data["rendered_user_prompt"] = prompt
-            if system_message:
-                 log_data["rendered_system_message"] = system_message
-        
-        # To avoid confusion, 'rendered_prompt' from previous version is now more specific.
-        # 'prompt' key from previous logging is effectively 'rendered_user_prompt'.
+            log_data["template_args"] = (
+                template_args if template_args is not None else []
+            )
+        if system_message:
+            log_data["rendered_system_message"] = system_message
 
         log_file = self.log_dir / f"request_{request_id}.json"
-        
+
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, ensure_ascii=False)
 
@@ -454,18 +401,40 @@ class PromptManager:
     def _log_response(self, request_id: str, response: dict[str, Any]) -> None:
         """Log an LLM response.
 
+        Logs text, structured_output, error, and key fields from raw_response
+        (id, model, usage) — omitting the full choices payload to keep log
+        files small across batch runs.
+
         Args:
             request_id: The ID of the request
             response: The response from the LLM
         """
+        # Build a trimmed copy for logging
+        loggable_response: dict[str, Any] = {}
+        if "text" in response:
+            loggable_response["text"] = response["text"]
+        if "structured_output" in response:
+            loggable_response["structured_output"] = response["structured_output"]
+        if "error" in response:
+            loggable_response["error"] = response["error"]
+
+        raw = response.get("raw_response")
+        if isinstance(raw, dict):
+            summary = {k: raw[k] for k in ("id", "model", "usage") if k in raw}
+            # Extract finish_reason from first choice for truncation debugging
+            choices = raw.get("choices")
+            if isinstance(choices, list) and choices:
+                summary["finish_reason"] = choices[0].get("finish_reason")
+            loggable_response["raw_response_summary"] = summary
+
         log_data = {
             "request_id": request_id,
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
-            "response": response,
+            "response": loggable_response,
         }
 
         log_file = self.log_dir / f"response_{request_id}.json"
-        
+
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, ensure_ascii=False)
 

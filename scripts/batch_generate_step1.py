@@ -7,12 +7,11 @@ Run the current role-based prompt across multiple LLM providers & runs.
 import json
 from pathlib import Path
 
-import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from gpr_zero.llm.dictionary_generator import DictionaryGenerator
-from gpr_zero.llm.prompt_manager import PromptManager
+from gpr_zero.llm.prompt_manager import PromptManager  # noqa: E402
 
 # Configuration: providers and run counts
 PROVIDERS = {
@@ -28,7 +27,7 @@ ROLE_MAP = {
     "defense_minister": "Taiwanese Minister of Defense",
     "journalist": "Senior Taiwanese Journalist specializing in Cross-Strait Relations",
     "nsb_director": "Director of Taiwan's National Security Bureau",
-    "poli_professor": "Taiwanese Politics Professor"
+    "poli_professor": "Taiwanese Politics Professor",
 }
 
 # Path to the role-based prompt template
@@ -38,10 +37,9 @@ PROMPT_FILE = Path("prompts/generate_taiwan_gpr_dictionary_role_based.json")
 OUTPUT_DIR = Path("data/dictionaries/step1_batch")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def main():
-    # Initialize PromptManager and DictionaryGenerator
-    pm = PromptManager()
-    gen = DictionaryGenerator(prompt_manager=pm, output_dir=str(OUTPUT_DIR))
+    pm = PromptManager(provider="openrouter")
 
     for provider_key, cfg in PROVIDERS.items():
         model_name = cfg["model"]
@@ -51,18 +49,31 @@ def main():
             for i in range(1, run_count + 1):
                 output_name = f"{provider_key}_{abbr}_run{i}"
                 print(f"Generating dictionary: {output_name} using model {model_name}")
-                dictionary = gen.generate_dictionary(
-                    strategy="prompt_file",
-                    prompt_file_path=PROMPT_FILE,
+
+                response = pm.call_llm_with_prompt_file(
+                    prompt_template_file=PROMPT_FILE,
                     template_args_list=[{"role": full_role}],
-                    model=model_name,
-                    temperature=None,
-                    name=output_name
+                    model_override=model_name,
                 )
-                # Optionally save metadata summary
+
+                dictionary = response.get("structured_output") or json.loads(
+                    response["text"]
+                )
+
+                # Save dictionary
+                output_path = OUTPUT_DIR / f"{output_name}.json"
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(dictionary, f, ensure_ascii=False, indent=2)
+
+                # Save metadata summary
                 summary_path = OUTPUT_DIR / f"{output_name}_meta.json"
                 with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(dictionary.get("metadata", {}), f, ensure_ascii=False, indent=2)
+                    json.dump(
+                        response.get("metadata", {}), f, ensure_ascii=False, indent=2
+                    )
+
+                print(f"  Saved: {output_path}")
+
 
 if __name__ == "__main__":
     main()

@@ -33,7 +33,6 @@ else:
 
 # Import gpr_zero modules directly (they are auto-installed by uv)
 from gpr_zero.gpr_index.calculator import GPRCalculator
-from gpr_zero.gpr_index.analyzer import GPRAnalyzer
 # %%
 import polars as pl
 df = pl.read_ndjson("/home5/chuenho/gpr-zero/data/news/processed/LT-military_buildup_02.ndjson")

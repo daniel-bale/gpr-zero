@@ -20,7 +20,7 @@ import seaborn as sns
 sys.path.append(str(Path(__file__).parent.parent))
 
 import ibis
-from gpr_zero.gpr_index.calculator_binary_matrix import GPRCalculatorBinaryMatrix
+from gpr_zero.gpr_index.calculator import GPRCalculator
 from gpr_zero.utils.font_setup import ensure_cjk_font_setup
 
 # Configure logging
@@ -79,7 +79,7 @@ def calculate_newspaper_gpr_indices():
     # (must match the 80-dictionary word_column_mapping used to create the cached table)
     all_dict_files = sorted(dictionaries_dir.glob("*.json"))
     logger.info(f"Initializing GPR calculator with all {len(all_dict_files)} dictionaries...")
-    calculator = GPRCalculatorBinaryMatrix([str(f) for f in all_dict_files])
+    calculator = GPRCalculator([str(f) for f in all_dict_files])
 
     # Get articles table and load cached binary matrix
     articles_table = conn.table("articles")
@@ -432,7 +432,7 @@ def analyze_spike_words(unique_spikes, output_dir):
     # Initialize calculator for word analysis (use all dictionaries to match cached table mapping)
     dictionaries_dir = project_root / "data" / "dictionaries" / "all_dictionaries"
     all_dict_files = sorted(dictionaries_dir.glob("*.json"))
-    calculator = GPRCalculatorBinaryMatrix([str(f) for f in all_dict_files])
+    calculator = GPRCalculator([str(f) for f in all_dict_files])
     
     # Get the cached binary matrix table
     try:
