@@ -444,7 +444,7 @@ def main():
                         'url': row['url'],
                         'outlet': row['outlet'],
                         'title': row['title'],
-                        'publish_date': row['extracted_publish_date'].strftime('%Y-%m-%d') if pd.notna(row['extracted_publish_date']) else None,
+                        'publish_date': str(row['extracted_publish_date'])[:10] if pd.notna(row['extracted_publish_date']) else None,
                         'weight': int(row['weight'])
                     })
                 

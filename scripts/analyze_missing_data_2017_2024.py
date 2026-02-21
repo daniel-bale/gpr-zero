@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Setup matplotlib for Chinese text
-from src.gpr_zero.utils.font_setup import ensure_cjk_font_setup
+from gpr_zero.utils.font_setup import ensure_cjk_font_setup
 ensure_cjk_font_setup()
 
 def analyze_missing_data_2017_2024():

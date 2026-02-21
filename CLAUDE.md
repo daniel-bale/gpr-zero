@@ -42,7 +42,7 @@ uv run main.py analyze --indices data/indices/gpr_index_chinatimes.csv data/indi
 python scripts/stage1_scan_warc.py --input path/to/warc/files --output-dir data/intermediate/stage1_parquet
 
 # Stage 2: HTML parsing and database loading
-python scripts/stage2_parse_html_load_db.py --input-dir data/intermediate/stage1_parquet --final-db-path data/news/taiwan_news_articles.duckdb
+python scripts/stage2_parse_html_load_db.py --input-dir data/intermediate/stage1_parquet --final-db data/news/taiwan_news_articles.duckdb
 ```
 
 ### Testing

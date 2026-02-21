@@ -42,6 +42,13 @@ NEWSPAPERS = {
     '聯合報': 'udn'
 }
 
+# Outlet names as they appear in the binary matrix table
+OUTLET_ENGLISH = {
+    'China Times (中國時報)': 'chinatimes',
+    'Liberty Times (自由時報)': 'ltn',
+    'United Daily (聯合報)': 'udn',
+}
+
 def calculate_newspaper_gpr_indices():
     """Calculate GPR indices for each newspaper using Step2 dictionaries."""
     
@@ -63,22 +70,21 @@ def calculate_newspaper_gpr_indices():
     # Get Step2 dictionary files
     step2_files = list(dictionaries_dir.glob("step2_*.json"))
     logger.info(f"Found {len(step2_files)} Step2 dictionary files")
-    
+
     if not step2_files:
         logger.error(f"No Step2 dictionary files found in {dictionaries_dir}")
         return
-    
-    # Initialize the binary matrix calculator with Step2 dictionaries
-    logger.info("Initializing GPR calculator with Step2 dictionaries...")
-    calculator = GPRCalculatorBinaryMatrix([str(f) for f in step2_files])
-    
-    # Get articles table
+
+    # Initialize the binary matrix calculator with ALL dictionaries
+    # (must match the 80-dictionary word_column_mapping used to create the cached table)
+    all_dict_files = sorted(dictionaries_dir.glob("*.json"))
+    logger.info(f"Initializing GPR calculator with all {len(all_dict_files)} dictionaries...")
+    calculator = GPRCalculatorBinaryMatrix([str(f) for f in all_dict_files])
+
+    # Get articles table and load cached binary matrix
     articles_table = conn.table("articles")
-    
-    # Use cached binary matrix
-    logger.info("Using cached binary matrix for Step2 dictionaries...")
-    # The binary matrix should already exist from previous runs
-    # No need to prepare it again
+    logger.info("Loading cached binary matrix...")
+    calculator.prepare_binary_matrix(articles_table, materialize=True)
     
     # Process all newspapers at once by grouping by outlet
     logger.info("Calculating GPR for all newspapers with outlet grouping...")
@@ -115,10 +121,17 @@ def calculate_newspaper_gpr_indices():
     # Combine all dictionary results
     combined_df = pd.concat(all_newspaper_data, ignore_index=True)
     
+    # Map English outlet names to short codes
+    combined_df['outlet'] = combined_df['outlet'].map(OUTLET_ENGLISH)
+
+    # Rename columns from query output to match script expectations
+    col_renames = {'warc_date_bucketed': 'date_bucket', 'total_gpr_share': 'overall_share'}
+    combined_df = combined_df.rename(columns={k: v for k, v in col_renames.items() if k in combined_df.columns})
+
     # Map outlet codes to Chinese names
     outlet_to_chinese = {v: k for k, v in NEWSPAPERS.items()}
     combined_df['newspaper_zh'] = combined_df['outlet'].map(outlet_to_chinese)
-    
+
     # Filter to keep only our target newspapers
     combined_df = combined_df[combined_df['newspaper_zh'].notna()]
     
@@ -416,10 +429,10 @@ def analyze_spike_words(unique_spikes, output_dir):
     db_path = "/home5/chuenho/data/news/stage2_enhanced_full.duckdb"
     conn = ibis.connect(f"duckdb:///{db_path}")
     
-    # Initialize calculator for word analysis
+    # Initialize calculator for word analysis (use all dictionaries to match cached table mapping)
     dictionaries_dir = project_root / "data" / "dictionaries" / "all_dictionaries"
-    step2_files = list(dictionaries_dir.glob("step2_*.json"))
-    calculator = GPRCalculatorBinaryMatrix([str(f) for f in step2_files])
+    all_dict_files = sorted(dictionaries_dir.glob("*.json"))
+    calculator = GPRCalculatorBinaryMatrix([str(f) for f in all_dict_files])
     
     # Get the cached binary matrix table
     try:
@@ -445,15 +458,18 @@ def analyze_spike_words(unique_spikes, output_dir):
         
         for spike in spikes:
             # Get articles during this spike period
+            # Map Chinese name to English outlet name used in binary matrix
+            code_to_english = {v: k for k, v in OUTLET_ENGLISH.items()}
+            outlet_english = code_to_english.get(newspaper_code, newspaper_zh)
             spike_articles = binary_table.filter(
-                (binary_table.outlet == newspaper_code) &
-                (binary_table.date_bucket >= spike['start']) &
-                (binary_table.date_bucket <= spike['end'])
+                (binary_table.outlet == outlet_english) &
+                (binary_table.warc_date >= spike['start']) &
+                (binary_table.warc_date <= spike['end'])
             )
-            
+
             # Count word occurrences
-            word_cols = [col for col in binary_table.columns 
-                        if col not in ['outlet', 'date_bucket', 'total_articles', 'url', 'warc_id']]
+            word_cols = [col for col in binary_table.columns
+                        if col.startswith('contains_word_')]
             
             for word_col in word_cols:
                 word_count = spike_articles[word_col].sum().execute()

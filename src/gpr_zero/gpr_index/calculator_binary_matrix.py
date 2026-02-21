@@ -92,6 +92,13 @@ class GPRCalculatorBinaryMatrix:
                 if table_exists and not force_recalculate:
                     logger.info(f"Loading existing materialized table: '{table_name}'")
                     self.labeled_articles_table = con.table(table_name)
+                    # Build word_column_mapping to match the cached table's column indices
+                    self.word_column_mapping = {}
+                    sorted_words = sorted(self.all_words)
+                    for i, word in enumerate(sorted_words):
+                        col_name = f"contains_word_{i:04d}"
+                        self.word_column_mapping[word] = col_name
+                    logger.info(f"Rebuilt word_column_mapping with {len(self.word_column_mapping)} entries")
                     return self.labeled_articles_table
 
                 if table_exists and force_recalculate:

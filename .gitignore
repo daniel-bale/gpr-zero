@@ -172,10 +172,12 @@ cython_debug/
 
 *.pdf
 data/
-data_analysis/**/*.png
+data_analysis/output/
+data_analysis/data_analysis/
 fastwarc-deps/
 logs/
 *.csv
 .cursor/
+.claude/
 *.parquet
-data_analysis/output/**/*.json
+x13as/
