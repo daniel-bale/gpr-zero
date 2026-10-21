@@ -10,7 +10,7 @@ from pathlib import Path
 
 import ibis
 
-from gpr_zero.constants import BINARY_MATRIX_TABLE, DEFAULT_DB_PATH
+from gpr_zero.constants import BINARY_MATRIX_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def get_connection(
     """Return an ibis DuckDB connection.
 
     Args:
-        db_path: Path to the DuckDB file. Defaults to ``DEFAULT_DB_PATH``.
+        db_path: Path to the DuckDB file. Defaults to the active project database.
         read_only: Open in read-only mode (default ``True``).
 
     Returns:
@@ -31,8 +31,12 @@ def get_connection(
     Raises:
         FileNotFoundError: If the database file does not exist.
     """
-    resolved = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
-    if not resolved.exists():
+    if db_path is None:
+        from gpr_zero.project import get_project
+
+        db_path = get_project().database
+    resolved = Path(db_path)
+    if read_only and not resolved.exists():
         raise FileNotFoundError(f"Database not found: {resolved}")
 
     conn = ibis.duckdb.connect(str(resolved), read_only=read_only)
@@ -40,7 +44,6 @@ def get_connection(
     return conn
 
 
-# TODO: words set might be different, a search or hash is needed to find the correct table name, or this should be stored in DB / metadata instead of hardcoded
 def get_binary_matrix(conn: ibis.BaseBackend) -> ibis.Table:
     """Return the cached binary matrix table from an open connection.
 
@@ -59,5 +62,5 @@ def get_binary_matrix(conn: ibis.BaseBackend) -> ibis.Table:
     except Exception as exc:
         raise ValueError(
             f"Table '{BINARY_MATRIX_TABLE}' not found. "
-            "Run GPRCalculator.prepare_binary_matrix(materialize=True) first."
+            "Run the explicit cache-build workflow first."
         ) from exc

@@ -1,0 +1,6 @@
+# Relative paths resolve beside this file. All analysis outputs and dictionary
+# locations derive from data; set database only when the corpus lives elsewhere.
+[paths]
+data = "data"
+# database = "/path/to/stage2_enhanced_full.duckdb"
+llm_config = "llm_config.yaml"

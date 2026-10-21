@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 import pytest
 
-# Need to make the script importable. For now, assume it's possible.
-# This might require adding scripts/ to sys.path or creating a package structure.
-# For simplicity, let's assume direct import works for now.
-from scripts.stage1_scan_warc import extract_domain
+from gpr_zero.workflows.ingest_warc import extract_domain
 
 # --- Tests for extract_domain ---
 

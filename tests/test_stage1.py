@@ -1,162 +1,233 @@
-#!/usr/bin/env python3
-import pytest
-import duckdb
-from pathlib import Path
-import logging
-from datetime import datetime
+"""Stage 1 integration checks using tiny WARC archives generated locally."""
 
-# Assuming conftest.py handles path adjustments
-from scripts.stage1_scan_warc import (
+import argparse
+import gzip
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import polars as pl
+
+from gpr_zero.workflows.ingest_warc import (
+    OUTPUT_COLUMNS,
+    load_domain_config,
     process_warc_file_stage1,
     scan_warc_files_parallel,
-    setup_intermediate_database,
-    load_domain_config,
-    TAIWANESE_DOMAINS_CONFIG, # Using the main config for now
-    INTERMEDIATE_DB_TABLE
 )
 
-# --- Fixtures ---
+DOMAIN_CONFIG = [
+    {"name": "Fixture Mandarin", "domains": ["example.tw"]},
+    {"name": "Fixture English", "domains": ["english.example.tw"], "is_english": True},
+]
+HTML = "<html><body>臺灣新聞</body></html>".encode()
 
-@pytest.fixture(scope="module")
-def domain_config_data():
-    """Provides the domain configuration list."""
-    return TAIWANESE_DOMAINS_CONFIG
 
-@pytest.fixture(scope="module")
-def loaded_domains(domain_config_data):
-    """Provides the loaded domain lookup structures (outlet map, target set, language map)."""
-    # Returns tuple: (domain_to_outlet, all_target_domains, domain_to_language)
-    return load_domain_config(domain_config_data)
-
-@pytest.fixture
-def intermediate_db_path(tmp_path: Path) -> Path:
-    """Provides a path for a temporary intermediate database."""
-    return tmp_path / "test_intermediate.duckdb"
-
-@pytest.fixture(scope="session")
-def sample_warc_dir() -> Path:
-    """Provides the path to the directory containing sample WARC files."""
-    path = Path("/home5/chuenho/data/crawl-data/CC-NEWS/2022/02/")
+def write_warc(path: Path, records: list[dict]) -> Path:
+    """Serialize real response records, without using production extraction code."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wb") as archive:
+        for index, record in enumerate(records):
+            body = record.get("body", HTML)
+            http = (
+                "HTTP/1.1 200 OK\r\n"
+                f"Content-Type: {record.get('content_type', 'text/html; charset=utf-8')}\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode() + body
+            headers = [
+                "WARC/1.0",
+                f"WARC-Type: {record.get('record_type', 'response')}",
+                f"WARC-Record-ID: <urn:uuid:00000000-0000-0000-0000-{index:012d}>",
+                f"WARC-Date: {record.get('date', '2020-01-02T03:04:05Z')}",
+                "Content-Type: application/http; msgtype=response",
+                f"Content-Length: {len(http)}",
+            ]
+            if record.get("url") is not None:
+                headers.append(f"WARC-Target-URI: {record['url']}")
+            archive.write(
+                "\r\n".join(headers).encode() + b"\r\n\r\n" + http + b"\r\n\r\n"
+            )
     return path
 
-@pytest.fixture
-def sample_warc_files(sample_warc_dir: Path) -> list[Path]:
-    """Lists the first ~32 sample WARC files from the directory."""
-    if not sample_warc_dir.is_dir():
-        pytest.skip(f"Sample WARC directory not accessible: {sample_warc_dir}")
-    files = sorted(list(sample_warc_dir.glob("*.warc.gz")))
-    if not files:
-        pytest.skip(f"No *.warc.gz files found in sample directory: {sample_warc_dir}")
-    return files[:32]
 
-# --- Integration Tests ---
-
-def test_process_warc_file_stage1(sample_warc_files: list[Path], loaded_domains: tuple):
-    """Tests processing a single sample WARC file."""
-    if not sample_warc_files:
-        pytest.skip("No sample WARC files available for single file test.")
-        
-    sample_file = sample_warc_files[0]
-    limit_records = 100
-    domain_to_outlet, all_target_domains, domain_to_language = loaded_domains # Unpack all three
-    
-    # Include the language map in the args tuple
-    args_tuple = (sample_file, limit_records, domain_to_outlet, all_target_domains, domain_to_language)
-    
-    result = process_warc_file_stage1(args_tuple)
-    
-    assert result["error"] is None, f"Processing {sample_file.name} failed: {result['error']}"
-    assert result["warc_file"] == str(sample_file)
-    assert result["records_processed"] > 0
-    # Add more specific assertions based on expected content of sample_file[0]
-    # e.g., assert result["target_html_extracted"] > 0
-    # e.g., assert len(result["articles_to_insert"]) == result["target_html_extracted"]
-    # e.g., check structure of items in result["articles_to_insert"]
-    logging.info(f"Single file test result for {sample_file.name}: Processed {result['records_processed']} records, found {result['target_html_extracted']} target HTML.")
-    
-    # Check structure of inserted data including language flag
-    if result["articles_to_insert"]:
-        first_article = result["articles_to_insert"][0]
-        # warc_id, warc_dt, url, matched_domain, outlet_name, is_english_flag, html_bytes
-        assert len(first_article) == 7
-        assert isinstance(first_article[5], bool) # is_english_flag
-        assert isinstance(first_article[6], bytes) # html_bytes
-
-def test_scan_warc_files_parallel(sample_warc_files: list[Path], intermediate_db_path: Path, domain_config_data: list[dict], caplog):
-    """Tests the parallel scanning function with sample files."""
-    if len(sample_warc_files) < 2:
-         pytest.skip("Not enough sample WARC files available for parallel test (>1 required).")
-
-    limit_records_per_file = 50
-    truncate_db = True
-    num_processes = 2
-    
-    # Mock args and log path for report generation
-    class MockArgs:
-        def __init__(self):
-            self.input = [str(f) for f in sample_warc_files]
-            self.pattern = "*.warc.gz"
-            self.limit_records = limit_records_per_file
-            self.max_files = None
-            self.intermediate_db = str(intermediate_db_path)
-            self.truncate = truncate_db
-            self.processes = num_processes
-            # Add other args if needed by report function
-    mock_args = MockArgs()
-    mock_log_path = Path(intermediate_db_path.parent / "mock_test_log.log")
-
-    caplog.set_level(logging.INFO)
-    
-    # Need to pass the timestamp string now
-    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S') 
-
-    results = scan_warc_files_parallel(
-        warc_files=sample_warc_files,
-        intermediate_db_path=intermediate_db_path,
-        limit_records_per_file=limit_records_per_file,
-        truncate_db=truncate_db,
-        num_processes=num_processes,
-        domain_config=domain_config_data,
-        args_for_report=mock_args, 
-        log_file_path_for_report=mock_log_path,
-        timestamp_str_for_report=run_timestamp # Pass timestamp
+def process(path, output, limit=None):
+    return process_warc_file_stage1(
+        (path, limit, *load_domain_config(DOMAIN_CONFIG), output)
     )
 
-    assert results is not None, "scan_warc_files_parallel returned None, indicating setup failure."
-    assert results["files_processed"] == len(sample_warc_files)
-    assert not results.get("errors"), f"Errors occurred during parallel scan: {results.get('errors')}"
-    
-    assert intermediate_db_path.exists(), "Intermediate database file was not created."
-    conn = None
-    try:
-        conn = duckdb.connect(str(intermediate_db_path), read_only=True)
-        count_query = conn.execute(f"SELECT COUNT(*) FROM {INTERMEDIATE_DB_TABLE}").fetchone()
-        assert count_query is not None
-        db_rows = count_query[0]
-        logging.info(f"Parallel scan inserted {db_rows} rows into intermediate DB.")
-        # We expect *some* rows to be inserted, but exact number depends on sample data
-        # assert db_rows == results["total_articles_inserted"] # Cannot accurately track this count easily
-        assert db_rows >= 0 # Check that the count is non-negative
 
-        # Optional: Query a sample row to check schema/content, including is_english
-        if db_rows > 0:
-            sample_row_query = f"SELECT warc_id, warc_date, url, domain, outlet, is_english, length(html_content_bytes) FROM {INTERMEDIATE_DB_TABLE} LIMIT 1"
-            # Revert query check for blob length (should be ok now), add is_english check
-            sample_row = conn.execute(sample_row_query).fetchone()
-            assert sample_row is not None
-            assert isinstance(sample_row[0], str) # warc_id
-            # warc_date might be None
-            assert isinstance(sample_row[2], str) # url
-            assert isinstance(sample_row[3], str) # domain
-            # outlet might be None
-            assert isinstance(sample_row[5], bool) # is_english
-            assert isinstance(sample_row[6], int)  # length(html_content_bytes) - Check if length works now?
-            assert sample_row[6] > 0
+def test_extracts_html_and_metadata_to_parquet_and_filters_other_records(tmp_path):
+    english_html = b"<html><body>English news</body></html>"
+    path = write_warc(
+        tmp_path / "fixture.warc.gz",
+        [
+            {"url": "https://www.example.tw/news/1"},
+            {
+                "url": "https://english.example.tw/news/2",
+                "body": english_html,
+                "content_type": "TEXT/HTML",
+            },
+            {"url": "https://outside.example/news/3"},
+            {
+                "url": "https://example.tw/data",
+                "content_type": "application/json",
+                "body": b"{}",
+            },
+            {"url": "https://example.tw/empty", "body": b""},
+            {"url": "https://example.tw/invalid-date", "date": "not-a-date"},
+            {"url": None},
+            {"url": "https://example.tw/request", "record_type": "request"},
+        ],
+    )
+    output = tmp_path / "parquet" / "2020" / "01"
+    result = process(path, output)
 
-    finally:
-        if conn:
-            conn.close()
-    
-    # Check if report file was mentioned in logs (doesn't check content)
-    report_log_found = any("Generating Stage 1 analysis report" in rec.message for rec in caplog.records)
-    assert report_log_found, "Report generation was not logged." 
+    assert result["error"] is None
+    assert result["warc_file"] == str(path)
+    assert result["records_processed"] == 7
+    assert result["target_domain_hits"] == 5
+    assert result["html_records_found"] == 4
+    assert result["target_html_extracted"] == 3
+    assert result["html_bytes_extracted"] == 2 * len(HTML) + len(english_html)
+    assert result["domain_counts"] == {
+        "example.tw": 4,
+        "english.example.tw": 1,
+        "outside.example": 1,
+    }
+    assert result["parquet_file_path"] == str(output / "fixture.warc.parquet")
+
+    actual = pl.read_parquet(result["parquet_file_path"])
+    assert actual.columns == OUTPUT_COLUMNS
+    assert actual["domain"].to_list() == [
+        "example.tw",
+        "english.example.tw",
+        "example.tw",
+    ]
+    assert actual["outlet"].to_list() == [
+        "Fixture Mandarin",
+        "Fixture English",
+        "Fixture Mandarin",
+    ]
+    assert actual["is_english"].to_list() == [False, True, False]
+    assert actual["html_content_bytes"].to_list() == [HTML, english_html, HTML]
+    assert actual["warc_date"].to_list() == [
+        datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
+    ] * 2 + [None]
+    assert actual["warc_id"].to_list() == [
+        f"<urn:uuid:00000000-0000-0000-0000-{index:012d}>" for index in [0, 1, 5]
+    ]
+
+
+def test_no_matching_records_does_not_create_empty_parquet(tmp_path):
+    path = write_warc(
+        tmp_path / "unrelated.warc.gz", [{"url": "https://outside.example/article"}]
+    )
+    output = tmp_path / "parquet"
+    result = process(path, output)
+
+    assert result["error"] is None
+    assert result["records_processed"] == 1
+    assert result["domain_counts"] == {"outside.example": 1}
+    assert result["target_html_extracted"] == 0
+    assert result["parquet_file_path"] is None
+    assert not output.exists()
+
+
+def test_record_limit_caps_extracted_articles(tmp_path):
+    path = write_warc(
+        tmp_path / "limited.warc.gz",
+        [{"url": f"https://example.tw/news/{index}"} for index in range(3)],
+    )
+    result = process(path, tmp_path / "parquet", limit=1)
+
+    assert result["error"] is None
+    assert result["target_html_extracted"] == 1
+    actual = pl.read_parquet(result["parquet_file_path"])
+    assert actual["url"].to_list() == ["https://example.tw/news/0"]
+
+
+def test_missing_archive_reports_failure_without_output(tmp_path):
+    result = process(tmp_path / "missing.warc.gz", tmp_path / "parquet")
+
+    assert result["error"]
+    assert result["records_processed"] == 0
+    assert result["target_html_extracted"] == 0
+    assert result["parquet_file_path"] is None
+
+
+def test_parquet_write_failure_is_reported_without_success_path(tmp_path):
+    path = write_warc(
+        tmp_path / "fixture.warc.gz", [{"url": "https://example.tw/news/1"}]
+    )
+    output = tmp_path / "not_a_directory"
+    output.write_text("existing file")
+    result = process(path, output)
+
+    assert result["target_html_extracted"] == 1
+    assert result["error"].startswith("Parquet writing error:")
+    assert result["parquet_file_path"] is None
+    assert output.read_text() == "existing file"
+
+
+def test_parallel_scan_writes_partitioned_parquet_and_reports_partial_failure(tmp_path):
+    paths = [
+        write_warc(
+            tmp_path / "warc" / "2020" / "01" / "first.warc.gz",
+            [{"url": "https://example.tw/news/1"}],
+        ),
+        write_warc(
+            tmp_path / "warc" / "2021" / "02" / "second.warc.gz",
+            [{"url": "https://english.example.tw/news/2"}],
+        ),
+        tmp_path / "warc" / "2021" / "02" / "missing.warc.gz",
+    ]
+    output = tmp_path / "parquet"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    timestamp = "fixture"
+    args = argparse.Namespace(
+        input=list(map(str, paths)),
+        pattern="*.warc.gz",
+        limit_records=None,
+        max_files=None,
+        output_dir=str(output),
+        processes=2,
+    )
+
+    result = scan_warc_files_parallel(
+        warc_files=paths,
+        output_dir=output,
+        limit_records_per_file=None,
+        num_processes=2,
+        domain_config=DOMAIN_CONFIG,
+        args_for_report=args,
+        log_file_path_for_report=logs / "scan.log",
+        timestamp_str_for_report=timestamp,
+    )
+
+    assert result["files_processed"] == 3
+    assert result["total_records_processed"] == 2
+    assert result["total_target_html_extracted"] == 2
+    assert result["total_html_bytes_extracted"] == 2 * len(HTML)
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["file"] == str(paths[2])
+    expected_paths = {
+        output / "2020" / "01" / "first.warc.parquet",
+        output / "2021" / "02" / "second.warc.parquet",
+    }
+    assert set(map(Path, result["parquet_files_created"])) == expected_paths
+    actual = pl.concat([pl.read_parquet(path) for path in sorted(expected_paths)])
+    assert actual.height == 2
+    assert set(actual["url"]) == {
+        "https://example.tw/news/1",
+        "https://english.example.tw/news/2",
+    }
+    assert actual["html_content_bytes"].to_list() == [HTML, HTML]
+    counts_path = logs / f"stage1_domain_counts_{timestamp}.json"
+    assert json.loads(counts_path.read_text()) == {
+        "example.tw": 1,
+        "english.example.tw": 1,
+    }
+    report = (logs / f"stage1_scan_report_{timestamp}.md").read_text()
+    assert "**Files Processed:** 3" in report
+    assert "**Target HTML Records Extracted (to Parquet):** 2" in report
+    assert "missing.warc.gz" in report

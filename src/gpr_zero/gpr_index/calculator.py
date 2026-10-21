@@ -7,12 +7,15 @@ dictionary coverage by matching word sets and categories at query time.
 import json
 import logging
 from pathlib import Path
-from functools import reduce
-from operator import and_, or_
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import ibis
 import ibis.expr.types as ir
+
+from gpr_zero.gpr_index.dictionary import DictionaryMatcher
+
+if TYPE_CHECKING:
+    from gpr_zero.gpr_index.corpus import DictionaryInventory
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +29,22 @@ class GPRCalculator:
     3. Match word sets and categories at query time (``query``)
     """
 
-    def __init__(self, dictionary_paths: list[str]):
+    def __init__(self, dictionary_paths: "list[str] | DictionaryInventory"):
         """Initialize with multiple dictionary paths to collect all words."""
-        self.dictionary_paths = dictionary_paths
+        from gpr_zero.gpr_index.corpus import DictionaryInventory
+
         self.all_words: set[str] = set()
         self.dictionaries: dict[str, dict] = {}
         self.labeled_articles_table: ir.Table | None = None
         self.word_column_mapping: dict[str, str] = {}
-        self._load_all_dictionaries()
+        if isinstance(dictionary_paths, DictionaryInventory):
+            self.dictionary_paths = list(dictionary_paths.dictionary_paths)
+            self.dictionaries = dict(dictionary_paths.dictionaries)
+            self.all_words = set(dictionary_paths.words)
+            self.word_column_mapping = dict(dictionary_paths.word_columns)
+        else:
+            self.dictionary_paths = dictionary_paths
+            self._load_all_dictionaries()
 
     def _load_all_dictionaries(self):
         """Load all dictionaries and collect unique words."""
@@ -62,7 +73,7 @@ class GPRCalculator:
                     f"Loaded dictionary {dict_name} with {len(data['word_sets'])} word sets"
                 )
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 -- Thesis skips every failed dictionary load.
                 logger.error(f"Failed to load dictionary {dict_path}: {e}")
                 continue
 
@@ -129,7 +140,7 @@ class GPRCalculator:
                             f"'{table_name}' exists and force_recalculate is True, but overwrite is False."
                         )
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 -- Preserve thesis cache-check fallback.
                 logger.warning(
                     f"Could not check for materialized table. Proceeding with in-memory calculation. Error: {e}"
                 )
@@ -176,7 +187,7 @@ class GPRCalculator:
                 con.create_table(table_name, labeled_table, overwrite=overwrite)
                 self.labeled_articles_table = con.table(table_name)
                 logger.info(f"Successfully materialized table '{table_name}'.")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 -- Preserve thesis materialization fallback.
                 logger.error(
                     f"Failed to materialize table '{table_name}'. Returning in-memory expression. Error: {e}"
                 )
@@ -191,15 +202,13 @@ class GPRCalculator:
 
         return self.labeled_articles_table
 
-    # TODO: refactor query() — extract time bucketing, word-set expression building,
-    # category expression building, aggregation construction, and query execution
-    # into separate private methods (currently ~200 lines, target <50 each).
     def query(
         self,
         dictionary_name: str,
         group_by_cols: list[str],
         time_bucket: str | None = None,
         time_col: str = "warc_date",
+        output_format: Literal["wide", "long"] = "wide",
     ):
         """
         Query GPR data for a specific dictionary, dynamically building word sets and categories.
@@ -209,9 +218,11 @@ class GPRCalculator:
             group_by_cols: List of column names to group by
             time_bucket: Optional time unit for bucketing ('W', 'M', 'Y', etc.)
             time_col: The name of the date/time column used for bucketing
+            output_format: Return counts and shares in 'wide' format, or
+                non-zero category and overall counts in 'long' format.
 
         Returns:
-            Polars DataFrame with aggregated GPR results (wide format)
+            Polars DataFrame with aggregated GPR results in the requested format
         """
         if self.labeled_articles_table is None:
             raise RuntimeError("Must call prepare_binary_matrix() first")
@@ -278,73 +289,9 @@ class GPRCalculator:
                 f"Updated group_by columns for bucketing: {final_group_by_cols}"
             )
 
-        # Build word set expressions using reduce
-        word_set_expressions = {}
-        for set_name, words in word_sets.items():
-            # Get columns for words that exist in this word set
-            relevant_word_columns = [
-                self.word_column_mapping.get(word)
-                for word in words
-                if word in self.word_column_mapping
-            ]
-
-            if relevant_word_columns:
-                # Use reduce with OR operator: any word in the set matches
-                word_columns_exprs = [query_table[col] for col in relevant_word_columns]
-                word_set_expr = reduce(or_, word_columns_exprs)
-                word_set_expressions[f"has_{set_name}"] = word_set_expr
-            else:
-                word_set_expressions[f"has_{set_name}"] = ibis.literal(False)
-
-        # Add word set columns to query table
-        query_table = query_table.mutate(**word_set_expressions)
-
-        # Build category expressions using reduce
-        category_expressions = {}
-        all_category_match_expressions = []
-
-        for category_name, query_string in categories.items():
-            # Parse category definition (word_set_A AND word_set_B)
-            # TODO: This parsing is so bad, need to implement a proper parser for more complex expressions in the future
-            components = [comp.strip() for comp in query_string.split(" AND ")]
-            required_list_names = []
-            for component in components:
-                sub_components = [name.strip() for name in component.split("+")]
-                for sub_comp_name in sub_components:
-                    actual_list_name = sub_comp_name.split("N/")[0].strip()
-                    if actual_list_name:
-                        required_list_names.append(actual_list_name)
-
-            if not required_list_names:
-                logger.warning(
-                    f"No valid word set names found for category '{category_name}'. Skipping."
-                )
-                category_expr = ibis.literal(False)
-            else:
-                # Get word set expressions needed for this category
-                has_columns = [
-                    query_table[f"has_{list_name}"] for list_name in required_list_names
-                ]
-                # Use reduce with AND operator: all word sets must match
-                category_expr = reduce(and_, has_columns, ibis.literal(True)).fill_null(
-                    False
-                )
-
-            category_expressions[f"is_{category_name}"] = category_expr
-            all_category_match_expressions.append(category_expr)
-
-        # Add category columns to query table
-        query_table = query_table.mutate(**category_expressions)
-
-        # Add overall match indicator
-        if all_category_match_expressions:
-            matches_any_category_expr = reduce(
-                or_, all_category_match_expressions
-            ).fill_null(False)
-        else:
-            matches_any_category_expr = ibis.literal(False)
-
-        query_table = query_table.mutate(matches_any_category=matches_any_category_expr)
+        query_table = DictionaryMatcher(dictionary).label_binary(
+            query_table, self.word_column_mapping
+        )
 
         # Build aggregations - always compute both counts and shares
         aggregations = {}
@@ -362,7 +309,7 @@ class GPRCalculator:
         # Category counts and shares
         category_count_aggs = {}
         category_share_aggs = {}
-        for category_name in categories.keys():
+        for category_name in categories:
             is_col_name = f"is_{category_name}"
             if is_col_name in query_table.columns:
                 count_agg = getattr(query_table, is_col_name).sum().cast("int64")
@@ -396,8 +343,69 @@ class GPRCalculator:
             logger.info(
                 f"Query successful. Result shape: {result_df.shape}, Columns: {result_df.columns}"
             )
-            return result_df
+            if output_format == "wide":
+                return result_df
+            if output_format == "long":
+                return self._reshape_to_long_format(result_df, final_group_by_cols)
+            raise ValueError(
+                f"Unknown output_format: {output_format}. Use 'wide' or 'long'."
+            )
 
         except Exception as e:
             logger.error(f"Error executing ibis query: {e}")
             raise
+
+    def _reshape_to_long_format(self, wide_df, group_by_cols: list[str]):
+        """Return the thesis long-format counts, omitting zero-count records."""
+        import polars as pl
+
+        base_cols = list(group_by_cols)
+        if "date_bucketed" in wide_df.columns:
+            base_cols.append("date_bucketed")
+        if "total_articles" in wide_df.columns:
+            base_cols.append("total_articles")
+
+        count_columns = [col for col in wide_df.columns if col.endswith("_count")]
+        category_count_cols = [
+            col for col in count_columns if not col.startswith("total_")
+        ]
+        long_dfs = []
+        for col in category_count_cols:
+            cond_name = col.removesuffix("_count")
+            df_subset = wide_df.select(base_cols + [col]).rename({col: "count"})
+            df_subset = df_subset.with_columns(
+                [
+                    pl.lit("category").alias("cond_type"),
+                    pl.lit(cond_name).alias("cond_name"),
+                ]
+            )
+            long_dfs.append(df_subset)
+
+        if "total_gpr_count" in wide_df.columns:
+            df_subset = wide_df.select(base_cols + ["total_gpr_count"]).rename(
+                {"total_gpr_count": "count"}
+            )
+            df_subset = df_subset.with_columns(
+                [
+                    pl.lit("overall").alias("cond_type"),
+                    pl.lit("total_gpr").alias("cond_name"),
+                ]
+            )
+            long_dfs.append(df_subset)
+
+        if long_dfs:
+            result_df = pl.concat(long_dfs, how="vertical")
+            final_cols = base_cols + ["cond_type", "cond_name", "count"]
+            result_df = result_df.select(
+                [col for col in final_cols if col in result_df.columns]
+            )
+            result_df = result_df.filter(pl.col("count") > 0)
+            logger.info(
+                "Reshaped to long format: %s condition types, %s non-zero records",
+                len(long_dfs),
+                len(result_df),
+            )
+            return result_df
+
+        logger.warning("No count columns found to reshape")
+        return pl.DataFrame()

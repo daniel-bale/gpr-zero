@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+Batch-generate GPR dictionaries (step 2):
+Run the stable 8-category prompt across multiple LLM providers.
+Generates 4 models x 5 runs = 20 dictionaries total.
+"""
+
+import json
+import random
+import time
+from pathlib import Path
+
+from gpr_zero.llm.dictionary_generator import DictionaryGenerator
+from gpr_zero.project import get_project
+
+# Configuration: providers and run counts
+PROVIDERS = {
+    "gpt-4.1": {"model": "openai/gpt-4.1", "runs": 5},
+    "gpt-4o": {"model": "openai/gpt-4o-2024-11-20", "runs": 5},
+    "gemini-2.5-pro": {"model": "google/gemini-2.5-pro", "runs": 5},
+    "claude-opus-4": {"model": "anthropic/claude-opus-4", "runs": 5},
+}
+
+# Path to the stable 8-category prompt template
+PROMPT_FILE = Path("prompts/generate_taiwan_gpr_dictionary_stable_8categories.json")
+
+
+def validate_dictionary(dictionary: dict, provider_key: str, run_num: int) -> bool:
+    """Validate that generated dictionary meets requirements."""
+    try:
+        if "categories" not in dictionary or "word_sets" not in dictionary:
+            print(f"  x Missing required fields for {provider_key} run {run_num}")
+            return False
+
+        categories = dictionary["categories"]
+        if len(categories) != 8:
+            print(
+                f"  x Expected 8 categories, got {len(categories)} "
+                f"for {provider_key} run {run_num}"
+            )
+            return False
+
+        word_sets = dictionary["word_sets"]
+        for word_set_name, words in word_sets.items():
+            if len(words) < 15:
+                print(
+                    f"  ! Word set '{word_set_name}' has only {len(words)} words (min 15)"
+                )
+            if len(words) > 25:
+                print(f"  ! Word set '{word_set_name}' has {len(words)} words (max 25)")
+
+        for cat_name, cat_logic in categories.items():
+            parts = cat_logic.split(" AND ")
+            for part in parts:
+                part = part.strip()
+                if part and part not in word_sets:
+                    print(
+                        f"  x Category '{cat_name}' references "
+                        f"non-existent word set '{part}'"
+                    )
+                    return False
+
+        return True
+    except Exception as e:
+        print(f"  x Validation error: {e}")
+        return False
+
+
+def main(project=None):
+    project = project or get_project()
+    output_dir = project.data_path("dictionaries", "step2_batch")
+    prompt_file = project.root / PROMPT_FILE
+    pm = project.prompt_manager()
+    generator = DictionaryGenerator(prompt_manager=pm, output_dir=str(output_dir))
+
+    total_runs = sum(cfg["runs"] for cfg in PROVIDERS.values())
+    successful = 0
+    failed = 0
+
+    print(f"Starting batch generation of {total_runs} dictionaries")
+    print(f"Output directory: {output_dir}\n")
+
+    for provider_key, cfg in PROVIDERS.items():
+        model_name = cfg["model"]
+        run_count = cfg["runs"]
+
+        print(f"\n{'=' * 60}")
+        print(f"Provider: {provider_key} (Model: {model_name})")
+        print(f"{'=' * 60}")
+
+        for run_num in range(1, run_count + 1):
+            output_name = f"{provider_key}_stable8cat_run{run_num}"
+            print(
+                f"\n[{provider_key} Run {run_num}/{run_count}] Generating: {output_name}"
+            )
+
+            try:
+                dictionary = generator.generate_dictionary(
+                    strategy="prompt_file",
+                    prompt_file_path=prompt_file,
+                    template_args_list=[],
+                    model=model_name,
+                    temperature=None,
+                    name=output_name,
+                )
+
+                if dictionary and validate_dictionary(
+                    dictionary, provider_key, run_num
+                ):
+                    output_path = output_dir / f"{output_name}.json"
+
+                    # Save metadata summary
+                    summary_path = output_dir / f"{output_name}_meta.json"
+                    with open(summary_path, "w", encoding="utf-8") as f:
+                        json.dump(
+                            dictionary.get("metadata", {}),
+                            f,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+
+                    print(f"  OK Successfully generated and validated: {output_path}")
+                    successful += 1
+                else:
+                    print("  x Failed validation")
+                    failed += 1
+
+            except Exception as e:
+                print(f"  x Error generating dictionary: {e}")
+                failed += 1
+
+            # Add delay between API calls to respect rate limits
+            if run_num < run_count or provider_key != list(PROVIDERS.keys())[-1]:
+                delay = random.uniform(2, 5)
+                print(f"  Waiting {delay:.1f}s before next generation...")
+                time.sleep(delay)
+
+    print(f"\n{'=' * 60}")
+    print("GENERATION COMPLETE")
+    print(f"{'=' * 60}")
+    print(f"Total attempts: {total_runs}")
+    print(f"Successful: {successful}")
+    print(f"Failed: {failed}")
+    print(f"\nOutput directory: {output_dir}")
+
+    generated_files = list(output_dir.glob("*_stable8cat_run*.json"))
+    if generated_files:
+        print(f"\nGenerated {len(generated_files)} dictionary files:")
+        for f in sorted(generated_files)[:10]:
+            print(f"  - {f.name}")
+        if len(generated_files) > 10:
+            print(f"  ... and {len(generated_files) - 10} more")
